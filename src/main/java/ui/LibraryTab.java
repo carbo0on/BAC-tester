@@ -17,6 +17,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 /**
  * Library tab: left = folder tree, right = test cases table with danger-colored methods.
@@ -51,6 +52,13 @@ public class LibraryTab extends JPanel {
     // Currently selected folder (null = Inbox, "ALL" sentinel = show all)
     private Long selectedFolderIdState = null; // null = Inbox
     private boolean showAll = false;
+
+    // Callbacks wired by MainTab in Phase 5
+    private Consumer<List<Long>> onAddToWorkingSet;
+    private Consumer<Long>       onOpenInCompare;
+
+    public void setOnAddToWorkingSet(Consumer<List<Long>> cb) { this.onAddToWorkingSet = cb; }
+    public void setOnOpenInCompare(Consumer<Long> cb)         { this.onOpenInCompare = cb; }
 
     public LibraryTab(MontoyaApi api, FolderRepository folderRepo,
                       TestCaseRepository tcRepo, CaptureService captureService) {
@@ -343,8 +351,14 @@ public class LibraryTab extends JPanel {
 
         JLabel selLabel = new JLabel("0 selected");
         JButton addToWorkingSet = new JButton("Add to Working Set");
-        addToWorkingSet.setToolTipText("Open in Compare tab for keyboard navigation (Phase 5)");
-        addToWorkingSet.setEnabled(false); // Phase 5
+        addToWorkingSet.setToolTipText("Add selected test cases to Compare tab working set");
+        addToWorkingSet.addActionListener(e -> {
+            int[] rows = table.getSelectedRows();
+            if (rows.length == 0 || onAddToWorkingSet == null) return;
+            List<Long> ids = new ArrayList<>();
+            for (int r : rows) ids.add(tableModel.getRow(r).id());
+            onAddToWorkingSet.accept(ids);
+        });
 
         bar.add(selLabel);
         bar.add(addToWorkingSet);
@@ -364,15 +378,17 @@ public class LibraryTab extends JPanel {
 
     private void wireTableContextMenu() {
         JPopupMenu popup = new JPopupMenu();
-        JMenuItem renameItem = new JMenuItem("Rename");
-        JMenuItem moveItem   = new JMenuItem("Move to Folder…");
-        JMenuItem deleteItem = new JMenuItem("Delete");
-        JMenuItem viewItem   = new JMenuItem("View Request / Response");
+        JMenuItem renameItem  = new JMenuItem("Rename");
+        JMenuItem moveItem    = new JMenuItem("Move to Folder…");
+        JMenuItem deleteItem  = new JMenuItem("Delete");
+        JMenuItem viewItem    = new JMenuItem("View Request / Response");
+        JMenuItem compareItem = new JMenuItem("Open in Compare");
 
         popup.add(renameItem);
         popup.add(moveItem);
         popup.addSeparator();
         popup.add(viewItem);
+        popup.add(compareItem);
         popup.addSeparator();
         popup.add(deleteItem);
 
@@ -434,6 +450,12 @@ public class LibraryTab extends JPanel {
             int row = table.getSelectedRow();
             if (row < 0) return;
             showRequestResponseViewer(tableModel.getRow(row));
+        });
+
+        compareItem.addActionListener(e -> {
+            int row = table.getSelectedRow();
+            if (row < 0 || onOpenInCompare == null) return;
+            onOpenInCompare.accept(tableModel.getRow(row).id());
         });
     }
 

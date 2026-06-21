@@ -5,6 +5,7 @@ import capture.CaptureService;
 import db.AccountRepository;
 import db.DatabaseManager;
 import db.FolderRepository;
+import db.RunRepository;
 import db.TestCaseRepository;
 import engine.RunEngine;
 
@@ -23,11 +24,13 @@ public class MainTab {
     private final LibraryTab libraryTab;
     private final AccountsTab accountsTab;
     private final TestRunTab testRunTab;
+    private final CompareTab compareTab;
 
     // Sub-tab indices
     private static final int TAB_LIBRARY  = 0;
     private static final int TAB_ACCOUNTS = 1;
     private static final int TAB_TESTRUN  = 2;
+    private static final int TAB_COMPARE  = 3;
 
     public MainTab(MontoyaApi api, DatabaseManager db,
                    CaptureService captureService, AccountRepository accountRepo) {
@@ -35,24 +38,42 @@ public class MainTab {
 
         FolderRepository   folderRepo = new FolderRepository(db);
         TestCaseRepository tcRepo     = new TestCaseRepository(db);
+        RunRepository      runRepo    = new RunRepository(db);
         RunEngine          runEngine  = new RunEngine(api, db);
 
         libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService);
         accountsTab = new AccountsTab(api, accountRepo, tcRepo);
         testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
+        compareTab  = new CompareTab(api, db, tcRepo, runRepo, accountRepo);
+
+        tabbedPane = new JTabbedPane();
+        tabbedPane.addTab("Library",  libraryTab);
+        tabbedPane.addTab("Accounts", accountsTab);
+        tabbedPane.addTab("Test Run", testRunTab);
+        tabbedPane.addTab("Compare",  compareTab);
+        tabbedPane.addTab("Settings", placeholder("Settings — Phase 7"));
+
+        // Wire Library → Compare (after tabbedPane is ready)
+        libraryTab.setOnAddToWorkingSet(ids -> {
+            compareTab.addToWorkingSet(ids);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+        libraryTab.setOnOpenInCompare(id -> {
+            compareTab.openTestCase(id);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+
+        // Wire TestRun → Compare
+        testRunTab.setOnOpenInCompare(id -> {
+            compareTab.openTestCase(id);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
 
         // Refresh TestRunTab scope when the Library saves new test cases
         captureService.addOnSaveListener(() -> {
             testRunTab.refreshScope();
             testRunTab.refreshAccounts();
         });
-
-        tabbedPane = new JTabbedPane();
-        tabbedPane.addTab("Library",  libraryTab);
-        tabbedPane.addTab("Accounts", accountsTab);
-        tabbedPane.addTab("Test Run", testRunTab);
-        tabbedPane.addTab("Compare",  placeholder("Compare — Phase 5"));
-        tabbedPane.addTab("Settings", placeholder("Settings — Phase 7"));
 
         // Refresh TestRunTab accounts when switching to it
         tabbedPane.addChangeListener(e -> {

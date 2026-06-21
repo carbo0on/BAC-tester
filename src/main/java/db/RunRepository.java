@@ -139,6 +139,54 @@ public class RunRepository {
         }
     }
 
+    public synchronized List<ResultRecord> getResultsForTestCase(long testCaseId) throws SQLException {
+        String sql = """
+            SELECT r.id, r.run_id, r.test_case_id, tc.name AS tc_name,
+                   tc.method, tc.host, tc.url,
+                   r.account_id, a.name AS account_name,
+                   r.compared_baseline_id, r.expected_access,
+                   r.new_status, r.new_length, r.new_body_hash, r.new_response_raw,
+                   r.similarity, r.verdict, r.reviewed, r.user_note, r.created_at
+            FROM results r
+            LEFT JOIN test_cases tc ON tc.id = r.test_case_id
+            LEFT JOIN accounts a ON a.id = r.account_id
+            WHERE r.test_case_id = ?
+            ORDER BY r.created_at DESC
+            """;
+        List<ResultRecord> result = new ArrayList<>();
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setLong(1, testCaseId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Long blId = rs.getLong("compared_baseline_id");
+                    result.add(new ResultRecord(
+                        rs.getLong("id"),
+                        rs.getLong("run_id"),
+                        rs.getLong("test_case_id"),
+                        rs.getString("tc_name"),
+                        rs.getString("method"),
+                        rs.getString("host"),
+                        rs.getString("url"),
+                        rs.getLong("account_id"),
+                        rs.getString("account_name"),
+                        rs.wasNull() ? null : blId,
+                        rs.getString("expected_access"),
+                        rs.getInt("new_status"),
+                        rs.getInt("new_length"),
+                        rs.getString("new_body_hash"),
+                        rs.getBytes("new_response_raw"),
+                        rs.getDouble("similarity"),
+                        rs.getString("verdict"),
+                        rs.getInt("reviewed") == 1,
+                        rs.getString("user_note"),
+                        rs.getLong("created_at")
+                    ));
+                }
+            }
+        }
+        return result;
+    }
+
     public synchronized void markReviewed(long resultId, boolean reviewed, String note) throws SQLException {
         String sql = "UPDATE results SET reviewed = ?, user_note = ? WHERE id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {

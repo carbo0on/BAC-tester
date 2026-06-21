@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 /**
  * Phase 4 — Test Run tab.
@@ -87,6 +88,8 @@ public class TestRunTab extends JPanel {
         t.setDaemon(true);
         return t;
     });
+
+    private Consumer<Long> onOpenInCompare;
 
     public TestRunTab(MontoyaApi api, RunEngine engine,
                       AccountRepository accountRepo,
@@ -206,6 +209,18 @@ public class TestRunTab extends JPanel {
         }
 
         resultsTable.setDefaultRenderer(Object.class, new VerdictCellRenderer());
+
+        // Double-click → open in Compare
+        resultsTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2 && onOpenInCompare != null) {
+                    int row = resultsTable.rowAtPoint(e.getPoint());
+                    if (row < 0) return;
+                    RunRepository.ResultRecord r = tableModel.getRow(row);
+                    if (r != null) onOpenInCompare.accept(r.testCaseId());
+                }
+            }
+        });
 
         panel.add(new JScrollPane(resultsTable), BorderLayout.CENTER);
         api.userInterface().applyThemeToComponent(panel);
@@ -328,6 +343,8 @@ public class TestRunTab extends JPanel {
             }
         });
     }
+
+    public void setOnOpenInCompare(Consumer<Long> cb) { this.onOpenInCompare = cb; }
 
     public void refreshScope() {
         loader.submit(() -> {

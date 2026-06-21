@@ -156,6 +156,25 @@ public class TestCaseRepository {
         return query("1=1", ps -> {});
     }
 
+    public synchronized Optional<TestCaseRow> getById(long id) throws SQLException {
+        List<TestCaseRow> rows = query("tc.id = ?", ps -> ps.setLong(1, id));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    public synchronized Optional<Long> getPrimaryBaselineId(long tcId) throws SQLException {
+        String sql = "SELECT primary_baseline_id FROM test_cases WHERE id = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setLong(1, tcId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long v = rs.getLong(1);
+                    return rs.wasNull() ? Optional.empty() : Optional.of(v);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     public synchronized byte[] getRequestRaw(long id) throws SQLException {
         String sql = "SELECT request_raw FROM test_cases WHERE id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {

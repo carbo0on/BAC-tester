@@ -41,12 +41,15 @@ public class MainTab {
         RunRepository      runRepo    = new RunRepository(db);
         RunEngine          runEngine  = new RunEngine(api, db);
 
-        libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService);
+        libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService, db);
         accountsTab = new AccountsTab(api, accountRepo, tcRepo);
         testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
         compareTab  = new CompareTab(api, db, tcRepo, runRepo, accountRepo);
         ExportImportManager exportImport = new ExportImportManager(api, db);
         SettingsTab settingsTab = new SettingsTab(api, db, exportImport);
+        // When settings are saved (or an import finishes), refresh the Library
+        // so coloring mode / new test cases show immediately.
+        settingsTab.setOnSaved(() -> libraryTab.refresh());
 
         tabbedPane = new JTabbedPane();
         tabbedPane.addTab("Library",  libraryTab);

@@ -147,13 +147,16 @@ public class Extension implements BurpExtension {
         }
 
         private List<HttpRequestResponse> resolveTargets(ContextMenuEvent event) {
+            // Works in Proxy, Repeater and elsewhere. A response is NOT required —
+            // requests captured before they are sent get an empty baseline that can
+            // be filled in later via "Re-baseline".
             var editor = event.messageEditorRequestResponse();
             if (editor.isPresent()) {
                 HttpRequestResponse rr = editor.get().requestResponse();
-                if (rr.hasResponse()) return List.of(rr);
+                if (rr != null && rr.request() != null) return List.of(rr);
             }
             return event.selectedRequestResponses().stream()
-                .filter(HttpRequestResponse::hasResponse)
+                .filter(rr -> rr != null && rr.request() != null)
                 .toList();
         }
 

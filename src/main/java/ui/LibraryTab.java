@@ -6,6 +6,7 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 import capture.CaptureService;
 import db.AccountRepository;
 import db.AccountRepository.AccountRecord;
+import db.DatabaseManager;
 import db.FolderRepository;
 import db.FolderRepository.FolderRecord;
 import db.TestCaseRepository;
@@ -37,7 +38,19 @@ public class LibraryTab extends JPanel {
     private final FolderRepository folderRepo;
     private final TestCaseRepository tcRepo;
     private final CaptureService captureService;
+    private final DatabaseManager db;
     private AccountRepository accountRepo;
+
+    // Coloring mode: AUTO (by method) / MANUAL (by user tag) / OFF
+    private volatile String coloringMode = "AUTO";
+    private volatile boolean autoExpandFolders = true;
+
+    // Search/filter
+    private JTextField searchField;
+    private List<TestCaseRow> allRows = new ArrayList<>();
+
+    // Manual color tag palette (muted, theme-friendly)
+    static final String[] COLOR_TAGS = {"RED", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE"};
 
     // UI components
     private final JTree folderTree;
@@ -76,12 +89,14 @@ public class LibraryTab extends JPanel {
     }
 
     public LibraryTab(MontoyaApi api, FolderRepository folderRepo,
-                      TestCaseRepository tcRepo, CaptureService captureService) {
+                      TestCaseRepository tcRepo, CaptureService captureService,
+                      DatabaseManager db) {
         super(new BorderLayout());
         this.api = api;
         this.folderRepo = folderRepo;
         this.tcRepo = tcRepo;
         this.captureService = captureService;
+        this.db = db;
 
         // --- Folder tree ---
         treeRoot = new DefaultMutableTreeNode("Library");
@@ -150,6 +165,7 @@ public class LibraryTab extends JPanel {
     /** Reload folder tree + test case table from DB. */
     public void refresh() {
         refreshSessionCombo();
+        loadColoringMode();
         loader.submit(() -> {
             try {
                 List<FolderRecord> folders = folderRepo.getAllFolders();
@@ -157,13 +173,62 @@ public class LibraryTab extends JPanel {
                 List<TestCaseRow> rows = loadRows();
                 SwingUtilities.invokeLater(() -> {
                     rebuildTree(folders, inboxCount);
-                    tableModel.setRows(rows);
-                    updateStatus(rows.size());
+                    allRows = rows;
+                    applyFilter();
                 });
             } catch (Exception e) {
                 api.logging().logToError("[BAC] Library refresh failed: " + e.getMessage());
             }
         });
+    }
+
+    /** Reload display-related settings from the DB (cheap, runs off-EDT). */
+    private void loadColoringMode() {
+        loader.submit(() -> {
+            try {
+                String mode = db.getSetting("coloring_mode");
+                if (mode != null) coloringMode = mode;
+                String exp = db.getSetting("auto_expand_folders");
+                if (exp != null) autoExpandFolders = !"false".equalsIgnoreCase(exp);
+                SwingUtilities.invokeLater(table::repaint);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    /** Public hook so the Settings tab can push a live coloring-mode change. */
+    public void setColoringMode(String mode) {
+        if (mode != null) {
+            this.coloringMode = mode;
+            SwingUtilities.invokeLater(table::repaint);
+        }
+    }
+
+    /** Filter the in-memory rows by the search box text and push to the model. */
+    private void applyFilter() {
+        String q = searchField != null ? searchField.getText().trim().toLowerCase() : "";
+        List<TestCaseRow> shown;
+        if (q.isEmpty()) {
+            shown = allRows;
+        } else {
+            shown = new ArrayList<>();
+            for (TestCaseRow r : allRows) {
+                if (matchesQuery(r, q)) shown.add(r);
+            }
+        }
+        tableModel.setRows(shown);
+        updateStatus(shown.size());
+    }
+
+    private static boolean matchesQuery(TestCaseRow r, String q) {
+        return contains(r.name(), q)
+            || contains(r.url(), q)
+            || contains(r.host(), q)
+            || contains(r.method(), q)
+            || contains(r.notes(), q);
+    }
+
+    private static boolean contains(String s, String q) {
+        return s != null && s.toLowerCase().contains(q);
     }
 
     // ---- Tree ----------------------------------------------------------
@@ -192,8 +257,10 @@ public class LibraryTab extends JPanel {
         }
 
         treeModel.reload();
-        // Re-expand all
-        for (int i = 0; i < folderTree.getRowCount(); i++) folderTree.expandRow(i);
+        // Re-expand all (when enabled)
+        if (autoExpandFolders) {
+            for (int i = 0; i < folderTree.getRowCount(); i++) folderTree.expandRow(i);
+        }
 
         // Re-select the current path
         selectFolderNode(selectedFolderIdState);
@@ -332,12 +399,13 @@ public class LibraryTab extends JPanel {
         var cm = table.getColumnModel();
         cm.getColumn(0).setPreferredWidth(30);  cm.getColumn(0).setMaxWidth(36);  // danger
         cm.getColumn(1).setPreferredWidth(70);  cm.getColumn(1).setMaxWidth(90);  // method
-        cm.getColumn(2).setPreferredWidth(180);                                    // name
-        cm.getColumn(3).setPreferredWidth(130);                                    // host
-        cm.getColumn(4).setPreferredWidth(200);                                    // path
-        cm.getColumn(5).setPreferredWidth(90);  cm.getColumn(5).setMaxWidth(110); // status
-        cm.getColumn(6).setPreferredWidth(80);  cm.getColumn(6).setMaxWidth(90);  // size
-        cm.getColumn(7).setPreferredWidth(130); cm.getColumn(7).setMaxWidth(150); // captured
+        cm.getColumn(2).setPreferredWidth(170);                                    // name
+        cm.getColumn(3).setPreferredWidth(120);                                    // host
+        cm.getColumn(4).setPreferredWidth(190);                                    // path
+        cm.getColumn(5).setPreferredWidth(70);  cm.getColumn(5).setMaxWidth(100); // status
+        cm.getColumn(6).setPreferredWidth(70);  cm.getColumn(6).setMaxWidth(90);  // size
+        cm.getColumn(7).setPreferredWidth(160);                                    // notes
+        cm.getColumn(8).setPreferredWidth(130); cm.getColumn(8).setMaxWidth(150); // captured
     }
 
     private JPanel buildRightToolbar() {
@@ -358,6 +426,24 @@ public class LibraryTab extends JPanel {
             }
         });
         bar.add(newFolderBtn);
+
+        // --- Search / filter box ---
+        bar.add(new JLabel("   🔎 Search:"));
+        searchField = new JTextField(22);
+        searchField.setToolTipText("Filter by name, URL, host, method, or notes");
+        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
+        });
+        bar.add(searchField);
+
+        JButton clearBtn = new JButton("✕");
+        clearBtn.setMargin(new Insets(1, 6, 1, 6));
+        clearBtn.setToolTipText("Clear search");
+        clearBtn.addActionListener(e -> { searchField.setText(""); applyFilter(); });
+        bar.add(clearBtn);
+
         return bar;
     }
 
@@ -439,13 +525,28 @@ public class LibraryTab extends JPanel {
     private void wireTableContextMenu() {
         JPopupMenu popup = new JPopupMenu();
         JMenuItem renameItem    = new JMenuItem("Rename");
+        JMenuItem notesItem     = new JMenuItem("Edit Notes / Comment…");
         JMenuItem moveItem      = new JMenuItem("Move to Folder…");
         JMenuItem deleteItem    = new JMenuItem("Delete");
         JMenuItem viewItem      = new JMenuItem("View Request / Response");
         JMenuItem compareItem   = new JMenuItem("Open in Compare");
         JMenuItem rebaselineItem = new JMenuItem("Re-baseline (resend as owner)");
 
+        // Manual color submenu
+        JMenu colorMenu = new JMenu("Set Color");
+        for (String tag : COLOR_TAGS) {
+            JMenuItem ci = new JMenuItem(tag.charAt(0) + tag.substring(1).toLowerCase());
+            ci.addActionListener(e -> applyColorTag(tag));
+            colorMenu.add(ci);
+        }
+        colorMenu.addSeparator();
+        JMenuItem clearColor = new JMenuItem("Clear Color");
+        clearColor.addActionListener(e -> applyColorTag(null));
+        colorMenu.add(clearColor);
+
         popup.add(renameItem);
+        popup.add(notesItem);
+        popup.add(colorMenu);
         popup.add(moveItem);
         popup.addSeparator();
         popup.add(viewItem);
@@ -483,6 +584,11 @@ public class LibraryTab extends JPanel {
                     }
                 });
             }
+        });
+
+        notesItem.addActionListener(e -> {
+            int row = table.getSelectedRow();
+            if (row >= 0) editNotes(row);
         });
 
         moveItem.addActionListener(e -> {
@@ -719,14 +825,36 @@ public class LibraryTab extends JPanel {
     }
 
     private void wireInlineRename() {
-        // Double-click on name column (col 2)
+        // Double-click: name column (2) → rename; notes column (7) → edit notes
         table.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     int row = table.rowAtPoint(e.getPoint());
                     int col = table.columnAtPoint(e.getPoint());
-                    if (row >= 0 && col == 2) triggerRename(row);
+                    if (row < 0) return;
+                    if (col == 2) triggerRename(row);
+                    else if (col == 7) editNotes(row);
                 }
+            }
+        });
+    }
+
+    private void editNotes(int row) {
+        TestCaseRow tc = tableModel.getRow(row);
+        JTextArea area = new JTextArea(tc.notes() != null ? tc.notes() : "", 8, 40);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        int ok = JOptionPane.showConfirmDialog(this, new JScrollPane(area),
+            "Notes / Comment — " + (tc.name() != null ? tc.name() : tc.url()),
+            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) return;
+        String notes = area.getText();
+        loader.submit(() -> {
+            try {
+                tcRepo.setNotes(tc.id(), notes);
+                SwingUtilities.invokeLater(this::reloadTable);
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Save notes failed: " + ex.getMessage());
             }
         });
     }
@@ -754,11 +882,31 @@ public class LibraryTab extends JPanel {
             try {
                 List<TestCaseRow> rows = loadRows();
                 SwingUtilities.invokeLater(() -> {
-                    tableModel.setRows(rows);
-                    updateStatus(rows.size());
+                    allRows = rows;
+                    applyFilter();
                 });
             } catch (Exception e) {
                 api.logging().logToError("[BAC] Table reload failed: " + e.getMessage());
+            }
+        });
+    }
+
+    /** Apply a manual color tag (or null to clear) to all selected test cases. */
+    private void applyColorTag(String tag) {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) return;
+        long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
+        loader.submit(() -> {
+            try {
+                for (long id : ids) tcRepo.setColorTag(id, tag);
+                // If user is tagging colors, gently switch to MANUAL mode so it shows.
+                if (tag != null && !"MANUAL".equalsIgnoreCase(coloringMode)) {
+                    db.setSetting("coloring_mode", "MANUAL");
+                    coloringMode = "MANUAL";
+                }
+                SwingUtilities.invokeLater(this::reloadTable);
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Set color failed: " + ex.getMessage());
             }
         });
     }
@@ -782,7 +930,7 @@ public class LibraryTab extends JPanel {
 
     private static class TestCaseTableModel extends javax.swing.table.AbstractTableModel {
         private static final String[] COLS =
-            {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Captured"};
+            {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Notes", "Captured"};
 
         private List<TestCaseRow> rows = new ArrayList<>();
 
@@ -808,7 +956,8 @@ public class LibraryTab extends JPanel {
                 case 4 -> extractPath(r.url());
                 case 5 -> r.primaryBaselineStatus() != null ? String.valueOf(r.primaryBaselineStatus()) : "—";
                 case 6 -> r.primaryBaselineLength() != null ? formatSize(r.primaryBaselineLength()) : "—";
-                case 7 -> DATE_FMT.format(Instant.ofEpochSecond(r.capturedAt()));
+                case 7 -> r.notes() != null ? r.notes().replaceAll("\\s+", " ").trim() : "";
+                case 8 -> DATE_FMT.format(Instant.ofEpochSecond(r.capturedAt()));
                 default -> "";
             };
         }
@@ -857,6 +1006,9 @@ public class LibraryTab extends JPanel {
         private static final Color RED_BG    = new Color(0x4D, 0x1F, 0x1F, 160);
         private static final Color ORANGE_BG = new Color(0x4D, 0x35, 0x0A, 160);
         private static final Color YELLOW_BG = new Color(0x44, 0x40, 0x00, 160);
+        private static final Color GREEN_BG  = new Color(0x1F, 0x44, 0x1F, 160);
+        private static final Color BLUE_BG   = new Color(0x1A, 0x33, 0x52, 160);
+        private static final Color PURPLE_BG = new Color(0x3A, 0x1F, 0x4D, 160);
 
         @Override
         public Component getTableCellRendererComponent(JTable t, Object value,
@@ -866,18 +1018,21 @@ public class LibraryTab extends JPanel {
                 lbl.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
                 if (!selected) {
                     TestCaseRow rowData = tableModel.getRow(row);
-                    String method = rowData.method();
-                    Color bg = methodBg(method);
-                    if (bg != null) {
-                        lbl.setBackground(blend(t.getBackground(), bg));
-                        lbl.setOpaque(true);
-                    } else {
-                        lbl.setBackground(t.getBackground());
-                        lbl.setOpaque(true);
-                    }
+                    Color bg = rowBackground(rowData);
+                    lbl.setBackground(bg != null ? blend(t.getBackground(), bg) : t.getBackground());
+                    lbl.setOpaque(true);
                 }
             }
             return c;
+        }
+
+        /** Resolve the row background according to the active coloring mode. */
+        private Color rowBackground(TestCaseRow r) {
+            return switch (coloringMode == null ? "AUTO" : coloringMode.toUpperCase()) {
+                case "OFF"    -> null;
+                case "MANUAL" -> tagBg(r.colorTag());
+                default       -> methodBg(r.method()); // AUTO
+            };
         }
 
         private Color methodBg(String method) {
@@ -887,6 +1042,19 @@ public class LibraryTab extends JPanel {
                 case "PUT", "PATCH" -> ORANGE_BG;
                 case "POST"         -> YELLOW_BG;
                 default             -> null;
+            };
+        }
+
+        private Color tagBg(String tag) {
+            if (tag == null) return null;
+            return switch (tag.toUpperCase()) {
+                case "RED"    -> RED_BG;
+                case "ORANGE" -> ORANGE_BG;
+                case "YELLOW" -> YELLOW_BG;
+                case "GREEN"  -> GREEN_BG;
+                case "BLUE"   -> BLUE_BG;
+                case "PURPLE" -> PURPLE_BG;
+                default       -> null;
             };
         }
 

@@ -1,0 +1,107 @@
+package ui;
+
+import burp.api.montoya.MontoyaApi;
+import capture.CaptureService;
+import db.AccountRepository;
+import db.DatabaseManager;
+import db.FolderRepository;
+import db.RunRepository;
+import db.TestCaseRepository;
+import engine.RunEngine;
+
+import javax.swing.*;
+import java.awt.*;
+import java.util.Map;
+
+/**
+ * Root "BAC Time-Machine" Burp suite tab.
+ * Hosts 5 sub-tabs: Library | Accounts | Test Run | Compare | Settings.
+ */
+public class MainTab {
+
+    private final MontoyaApi api;
+    private final JTabbedPane tabbedPane;
+    private final LibraryTab libraryTab;
+    private final AccountsTab accountsTab;
+    private final TestRunTab testRunTab;
+    private final CompareTab compareTab;
+
+    // Sub-tab indices
+    private static final int TAB_LIBRARY  = 0;
+    private static final int TAB_ACCOUNTS = 1;
+    private static final int TAB_TESTRUN  = 2;
+    private static final int TAB_COMPARE  = 3;
+
+    public MainTab(MontoyaApi api, DatabaseManager db,
+                   CaptureService captureService, AccountRepository accountRepo) {
+        this.api = api;
+
+        FolderRepository   folderRepo = new FolderRepository(db);
+        TestCaseRepository tcRepo     = new TestCaseRepository(db);
+        RunRepository      runRepo    = new RunRepository(db);
+        RunEngine          runEngine  = new RunEngine(api, db);
+
+        libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService);
+        accountsTab = new AccountsTab(api, accountRepo, tcRepo);
+        testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
+        compareTab  = new CompareTab(api, db, tcRepo, runRepo, accountRepo);
+        ExportImportManager exportImport = new ExportImportManager(api, db);
+        SettingsTab settingsTab = new SettingsTab(api, db, exportImport);
+
+        tabbedPane = new JTabbedPane();
+        tabbedPane.addTab("Library",  libraryTab);
+        tabbedPane.addTab("Accounts", accountsTab);
+        tabbedPane.addTab("Test Run", testRunTab);
+        tabbedPane.addTab("Compare",  compareTab);
+        tabbedPane.addTab("Settings", settingsTab);
+
+        // Wire Library → Compare (after tabbedPane is ready)
+        libraryTab.setAccountRepository(accountRepo);
+        libraryTab.setOnAddToWorkingSet(ids -> {
+            compareTab.addToWorkingSet(ids);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+        libraryTab.setOnOpenInCompare(id -> {
+            compareTab.openTestCase(id);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+        libraryTab.setOnRunSelected((accountId, tcIds) -> {
+            testRunTab.startRunDirectly(accountId, tcIds);
+            tabbedPane.setSelectedIndex(TAB_TESTRUN);
+        });
+
+        // Wire TestRun → Compare
+        testRunTab.setOnOpenInCompare(id -> {
+            compareTab.openTestCase(id);
+            tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+
+        // Refresh TestRunTab scope when the Library saves new test cases
+        captureService.addOnSaveListener(() -> {
+            testRunTab.refreshScope();
+            testRunTab.refreshAccounts();
+        });
+
+        // Refresh TestRunTab accounts when switching to it
+        tabbedPane.addChangeListener(e -> {
+            if (tabbedPane.getSelectedIndex() == TAB_TESTRUN) {
+                testRunTab.refreshAccounts();
+                testRunTab.refreshScope();
+            }
+        });
+
+        api.userInterface().applyThemeToComponent(tabbedPane);
+    }
+
+    public String caption()        { return "BAC Time-Machine"; }
+    public Component uiComponent() { return tabbedPane; }
+
+    /** Pre-fill the Accounts editor from a captured session and switch to the Accounts tab. */
+    public void importAccountFromSession(Map<String, String> cookies,
+                                         Map<String, String> headers,
+                                         String suggestedName) {
+        accountsTab.prefillFromSession(cookies, headers, suggestedName);
+        tabbedPane.setSelectedIndex(TAB_ACCOUNTS);
+    }
+
+}

@@ -7,6 +7,7 @@ import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
 import burp.api.montoya.ui.hotkey.HotKey;
 import burp.api.montoya.ui.hotkey.HotKeyContext;
 import capture.CaptureService;
+import db.AccountRepository;
 import db.DatabaseManager;
 import db.FolderRepository;
 import db.TestCaseRepository;
@@ -17,15 +18,16 @@ import javax.swing.*;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * BAC Time-Machine — Burp Suite Extension entry point.
  *
  * Initialization order:
- *   1. Resolve / persist the SQLite database path via Burp preferences.
+ *   1. Resolve / persist the SQLite database path.
  *   2. Initialize DatabaseManager (creates schema if first run).
- *   3. Register extension unloading handler to close the DB cleanly.
- *   4. Build CaptureService and suite tab.
+ *   3. Register extension unloading handler.
+ *   4. Build repositories, CaptureService, and suite tab.
  *   5. Register context menu items provider.
  *   6. Register Ctrl+Alt+A hotkey for quick-save.
  */
@@ -39,14 +41,14 @@ public class Extension implements BurpExtension {
         api.extension().setName("BAC Time-Machine");
         Logging logging = api.logging();
 
-        // --- 1. Resolve database path -------------------------------------------
+        // --- 1. Database path -------------------------------------------
         String dbPath = api.persistence().preferences().getString("bac_db_path");
         if (dbPath == null || dbPath.isBlank()) {
             dbPath = System.getProperty("user.home") + "/.bac-timemachine/store.db";
             api.persistence().preferences().setString("bac_db_path", dbPath);
         }
 
-        // --- 2. Initialize SQLite -----------------------------------------------
+        // --- 2. Initialize SQLite ----------------------------------------
         try {
             dbManager = new DatabaseManager(dbPath, logging);
             dbManager.initialize();
@@ -56,48 +58,51 @@ public class Extension implements BurpExtension {
             return;
         }
 
-        // --- 3. Unloading handler -----------------------------------------------
+        // --- 3. Unloading handler ----------------------------------------
         api.extension().registerUnloadingHandler(() -> {
             dbManager.close();
             logging.logToOutput("[BAC] Extension unloaded.");
         });
 
-        // --- 4. Build capture service + suite tab --------------------------------
-        TestCaseRepository tcRepo = new TestCaseRepository(dbManager);
-        CaptureService captureService = new CaptureService(api, tcRepo);
+        // --- 4. Repositories + tab ---------------------------------------
+        AccountRepository  accountRepo = new AccountRepository(dbManager);
+        TestCaseRepository tcRepo      = new TestCaseRepository(dbManager);
+        CaptureService     capture     = new CaptureService(api, tcRepo);
 
-        mainTab = new MainTab(api, dbManager, captureService);
+        mainTab = new MainTab(api, dbManager, capture, accountRepo);
         api.userInterface().registerSuiteTab(mainTab.caption(), mainTab.uiComponent());
 
-        // --- 5. Context menu -----------------------------------------------------
-        api.userInterface().registerContextMenuItemsProvider(new BacContextMenuProvider(
-            api, captureService, new FolderRepository(dbManager)));
+        // --- 5. Context menu ---------------------------------------------
+        api.userInterface().registerContextMenuItemsProvider(
+            new BacContextMenuProvider(api, capture, accountRepo,
+                                       new FolderRepository(dbManager)));
 
-        // --- 6. Hotkey: Ctrl+Alt+A = quick-save to Inbox -------------------------
+        // --- 6. Hotkey: Ctrl+Alt+A → quick-save to Inbox ----------------
         api.userInterface().registerHotKeyHandler(
             HotKeyContext.HTTP_MESSAGE_EDITOR,
             HotKey.hotKey("BAC: Quick-save request", "Ctrl+Alt+A"),
-            event -> event.messageEditorRequestResponse().ifPresent(editor -> {
-                HttpRequestResponse rr = editor.requestResponse();
-                captureService.quickSaveToInbox(rr);
-                api.logging().logToOutput("[BAC] Hotkey quick-save triggered.");
-            })
+            event -> event.messageEditorRequestResponse().ifPresent(editor ->
+                capture.quickSaveToInbox(editor.requestResponse())
+            )
         );
 
         logging.logToOutput("[BAC] BAC Time-Machine loaded. Hotkey: Ctrl+Alt+A");
     }
 
-    // ---- Context menu provider ------------------------------------------
+    // ---- Context menu provider -----------------------------------------
 
-    private static class BacContextMenuProvider implements ContextMenuItemsProvider {
+    private class BacContextMenuProvider implements ContextMenuItemsProvider {
 
         private final MontoyaApi api;
-        private final CaptureService captureService;
+        private final CaptureService capture;
+        private final AccountRepository accountRepo;
         private final FolderRepository folderRepo;
 
-        BacContextMenuProvider(MontoyaApi api, CaptureService cs, FolderRepository fr) {
+        BacContextMenuProvider(MontoyaApi api, CaptureService cs,
+                                AccountRepository ar, FolderRepository fr) {
             this.api = api;
-            this.captureService = cs;
+            this.capture = cs;
+            this.accountRepo = ar;
             this.folderRepo = fr;
         }
 
@@ -108,66 +113,65 @@ public class Extension implements BurpExtension {
 
             List<Component> items = new ArrayList<>();
 
-            // --- Quick-save all selected to Inbox ---
-            JMenuItem quickSave = new JMenuItem("Quick-save to Inbox");
-            quickSave.addActionListener(e -> {
-                for (HttpRequestResponse rr : targets) captureService.quickSaveToInbox(rr);
-            });
-            items.add(quickSave);
-
-            // --- Save with dialog (single selection only) ---
-            if (targets.size() == 1) {
-                HttpRequestResponse rr = targets.get(0);
-                JMenuItem saveWithDialog = new JMenuItem("Send to BAC (save as test case)…");
-                saveWithDialog.addActionListener(e -> openSaveDialog(rr, event));
-                items.add(saveWithDialog);
-            }
-
-            // --- Create/Update account from this session (Phase 3) ---
-            JMenuItem createAccount = new JMenuItem("Create/Update account from this request's session");
-            createAccount.setEnabled(false); // Phase 3
-            items.add(createAccount);
-
-            items.add(new JSeparator());
+            // Header (disabled label) + separator
             JMenuItem header = new JMenuItem("BAC Time-Machine");
             header.setEnabled(false);
-            items.add(0, header);
-            items.add(1, new JSeparator());
+            items.add(header);
+            items.add(new JSeparator());
+
+            // Quick-save (supports multi-select)
+            JMenuItem quickSave = new JMenuItem("Quick-save to Inbox");
+            quickSave.addActionListener(e ->
+                targets.forEach(capture::quickSaveToInbox));
+            items.add(quickSave);
+
+            // Save with dialog (single only)
+            if (targets.size() == 1) {
+                HttpRequestResponse rr = targets.get(0);
+                JMenuItem saveDialog = new JMenuItem("Send to BAC (save as test case)…");
+                saveDialog.addActionListener(e -> openSaveDialog(rr));
+                items.add(saveDialog);
+            }
+
+            items.add(new JSeparator());
+
+            // Create/Update account from session
+            if (targets.size() == 1) {
+                HttpRequestResponse rr = targets.get(0);
+                JMenuItem importSession = new JMenuItem("Create/Update account from this request's session");
+                importSession.addActionListener(e -> importSessionFromRequest(rr));
+                items.add(importSession);
+            }
 
             return items;
         }
 
         private List<HttpRequestResponse> resolveTargets(ContextMenuEvent event) {
-            // Prefer message editor (single focused request)
             var editor = event.messageEditorRequestResponse();
             if (editor.isPresent()) {
                 HttpRequestResponse rr = editor.get().requestResponse();
                 if (rr.hasResponse()) return List.of(rr);
             }
-            // Fall back to selected table rows
             return event.selectedRequestResponses().stream()
                 .filter(HttpRequestResponse::hasResponse)
                 .toList();
         }
 
-        private void openSaveDialog(HttpRequestResponse rr, ContextMenuEvent event) {
+        private void openSaveDialog(HttpRequestResponse rr) {
             SwingUtilities.invokeLater(() -> {
                 try {
                     var folders = folderRepo.getAllFolders();
                     String defaultName = rr.request().method() + " "
-                        + extractLastSegment(rr.request().url());
-
+                        + lastSegment(rr.request().url());
                     Frame parent = api.userInterface().swingUtils().suiteFrame();
                     SaveDialog dlg = new SaveDialog(parent, folders, defaultName);
                     api.userInterface().applyThemeToComponent(dlg.getContentPane());
                     dlg.setVisible(true);
-
                     if (dlg.isConfirmed()) {
-                        captureService.saveWithMetadata(rr,
+                        capture.saveWithMetadata(rr,
                             dlg.getSelectedName(),
                             dlg.getSelectedFolderId(),
-                            null, // owner account: Phase 3
-                            dlg.getNotes());
+                            null, dlg.getNotes());
                     }
                 } catch (Exception e) {
                     api.logging().logToError("[BAC] Save dialog error: " + e.getMessage());
@@ -175,13 +179,28 @@ public class Extension implements BurpExtension {
             });
         }
 
-        private static String extractLastSegment(String url) {
+        private void importSessionFromRequest(HttpRequestResponse rr) {
+            // Extract cookies + session headers from the request
+            var req = rr.request();
+            String cookieHeader = req.headerValue("Cookie");
+            var extracted = AccountRepository.extractSession(cookieHeader, req.headers());
+            Map<String, String> cookies = extracted.getKey();
+            Map<String, String> headers = extracted.getValue();
+
+            String suggestedName = "Account from " + req.httpService().host();
+
+            // Pre-fill the Accounts tab and switch to it
+            SwingUtilities.invokeLater(() ->
+                mainTab.importAccountFromSession(cookies, headers, suggestedName));
+        }
+
+        private static String lastSegment(String url) {
             if (url == null) return "/";
             int q = url.indexOf('?');
             String path = q >= 0 ? url.substring(0, q) : url;
             int slash = path.lastIndexOf('/');
-            if (slash >= 0 && slash < path.length() - 1) return path.substring(slash + 1);
-            return path;
+            return slash >= 0 && slash < path.length() - 1
+                ? path.substring(slash + 1) : path;
         }
     }
 }

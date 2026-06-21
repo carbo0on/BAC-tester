@@ -227,6 +227,43 @@ public class TestCaseRepository {
         return result;
     }
 
+    // ---- Baseline write ------------------------------------------------
+
+    /** Add a new versioned baseline for a test case. Returns new baseline id. */
+    public synchronized long addBaseline(long tcId, Long accountId, String label,
+                                          int status, int length, byte[] responseRaw) throws SQLException {
+        long now = Instant.now().getEpochSecond();
+        String sql = """
+            INSERT INTO baselines (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, tcId);
+            if (accountId != null) ps.setLong(2, accountId); else ps.setNull(2, Types.INTEGER);
+            ps.setString(3, label != null ? label : "baseline");
+            ps.setInt(4, status);
+            ps.setInt(5, length);
+            ps.setString(6, sha256(responseRaw));
+            ps.setBytes(7, responseRaw);
+            ps.setLong(8, now);
+            ps.executeUpdate();
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                return rs.next() ? rs.getLong(1) : -1;
+            }
+        }
+    }
+
+    /** Set primary_baseline_id for a test case (does NOT delete old baselines). */
+    public synchronized void setPrimaryBaseline(long tcId, long baselineId) throws SQLException {
+        String sql = "UPDATE test_cases SET primary_baseline_id = ?, updated_at = ? WHERE id = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setLong(1, baselineId);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, tcId);
+            ps.executeUpdate();
+        }
+    }
+
     // ---- Update --------------------------------------------------------
 
     public synchronized void rename(long id, String name) throws SQLException {

@@ -161,6 +161,11 @@ public class RunEngine {
         }
 
         try {
+            // Scope check — warn but do not block (user may test out-of-scope intentionally)
+            if (!api.scope().isInScope(tc.url())) {
+                api.logging().logToOutput("[BAC] Warning: " + tc.url() + " is out of scope. Proceeding anyway.");
+            }
+
             HttpRequest req = buildSwappedRequest(requestRaw, account);
             if (req == null) {
                 saveResult(runId, tc, account, baselineId > 0 ? baselineId : null,

@@ -1,6 +1,8 @@
 package ui;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import capture.CaptureService;
 import db.AccountRepository;
 import db.AccountRepository.AccountRecord;
@@ -436,17 +438,20 @@ public class LibraryTab extends JPanel {
 
     private void wireTableContextMenu() {
         JPopupMenu popup = new JPopupMenu();
-        JMenuItem renameItem  = new JMenuItem("Rename");
-        JMenuItem moveItem    = new JMenuItem("Move to Folder…");
-        JMenuItem deleteItem  = new JMenuItem("Delete");
-        JMenuItem viewItem    = new JMenuItem("View Request / Response");
-        JMenuItem compareItem = new JMenuItem("Open in Compare");
+        JMenuItem renameItem    = new JMenuItem("Rename");
+        JMenuItem moveItem      = new JMenuItem("Move to Folder…");
+        JMenuItem deleteItem    = new JMenuItem("Delete");
+        JMenuItem viewItem      = new JMenuItem("View Request / Response");
+        JMenuItem compareItem   = new JMenuItem("Open in Compare");
+        JMenuItem rebaselineItem = new JMenuItem("Re-baseline (resend as owner)");
 
         popup.add(renameItem);
         popup.add(moveItem);
         popup.addSeparator();
         popup.add(viewItem);
         popup.add(compareItem);
+        popup.addSeparator();
+        popup.add(rebaselineItem);
         popup.addSeparator();
         popup.add(deleteItem);
 
@@ -515,6 +520,89 @@ public class LibraryTab extends JPanel {
             if (row < 0 || onOpenInCompare == null) return;
             onOpenInCompare.accept(tableModel.getRow(row).id());
         });
+
+        rebaselineItem.addActionListener(e -> {
+            int[] rows = table.getSelectedRows();
+            if (rows.length == 0) return;
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "Re-send " + rows.length + " request(s) using the owner account and save a new baseline version?\n" +
+                "Existing baselines will NOT be deleted.",
+                "Re-baseline", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
+            rebaselineAsync(ids);
+        });
+    }
+
+    private void rebaselineAsync(long[] tcIds) {
+        loader.submit(() -> {
+            int done = 0;
+            int errors = 0;
+            for (long tcId : tcIds) {
+                try {
+                    TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
+                    if (tc == null || tc.ownerAccountId() == null) { errors++; continue; }
+                    if (accountRepo == null) { errors++; continue; }
+                    AccountRecord owner = accountRepo.getById(tc.ownerAccountId()).orElse(null);
+                    if (owner == null) { errors++; continue; }
+
+                    byte[] reqRaw = tcRepo.getRequestRaw(tcId);
+                    if (reqRaw == null) { errors++; continue; }
+
+                    // Swap identity to owner
+                    HttpRequest req = buildOwnerRequest(reqRaw, owner);
+                    if (req == null) { errors++; continue; }
+
+                    var resp = api.http().sendRequest(req);
+                    byte[] respRaw = resp.response().toByteArray().getBytes();
+                    int status = resp.response().statusCode();
+                    int length = resp.response().body().length();
+                    String today = java.time.LocalDate.now().toString();
+
+                    long newBlId = tcRepo.addBaseline(tcId, owner.id(),
+                        "rebaseline " + today, status, length, respRaw);
+                    tcRepo.setPrimaryBaseline(tcId, newBlId);
+                    done++;
+                } catch (Exception ex) {
+                    api.logging().logToError("[BAC] Re-baseline error for TC " + tcId + ": " + ex.getMessage());
+                    errors++;
+                }
+            }
+            final int d = done, er = errors;
+            SwingUtilities.invokeLater(() -> {
+                refresh();
+                String msg = "Re-baseline complete: " + d + " succeeded" + (er > 0 ? ", " + er + " failed." : ".");
+                JOptionPane.showMessageDialog(this, msg, "Re-baseline", JOptionPane.INFORMATION_MESSAGE);
+            });
+        });
+    }
+
+    private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner) {
+        try {
+            HttpRequest req = HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
+            req = req.withRemovedHeader("Cookie");
+            req = req.withRemovedHeader("Authorization");
+            req = req.withRemovedHeader("X-Auth-Token");
+            req = req.withRemovedHeader("X-Session-Token");
+            req = req.withRemovedHeader("X-Access-Token");
+            req = req.withRemovedHeader("X-Api-Key");
+            Map<String, String> cookies = owner.cookies();
+            if (!cookies.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                for (var entry : cookies.entrySet()) {
+                    if (sb.length() > 0) sb.append("; ");
+                    sb.append(entry.getKey()).append("=").append(entry.getValue());
+                }
+                req = req.withAddedHeader("Cookie", sb.toString());
+            }
+            for (var entry : owner.headers().entrySet()) {
+                req = req.withAddedHeader(entry.getKey(), entry.getValue());
+            }
+            return req;
+        } catch (Exception e) {
+            api.logging().logToError("[BAC] Build owner request failed: " + e.getMessage());
+            return null;
+        }
     }
 
     private void showMoveFolderDialog(int[] selectedRows) {

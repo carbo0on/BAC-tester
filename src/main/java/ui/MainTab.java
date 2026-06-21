@@ -45,13 +45,15 @@ public class MainTab {
         accountsTab = new AccountsTab(api, accountRepo, tcRepo);
         testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
         compareTab  = new CompareTab(api, db, tcRepo, runRepo, accountRepo);
+        ExportImportManager exportImport = new ExportImportManager(api, db);
+        SettingsTab settingsTab = new SettingsTab(api, db, exportImport);
 
         tabbedPane = new JTabbedPane();
         tabbedPane.addTab("Library",  libraryTab);
         tabbedPane.addTab("Accounts", accountsTab);
         tabbedPane.addTab("Test Run", testRunTab);
         tabbedPane.addTab("Compare",  compareTab);
-        tabbedPane.addTab("Settings", placeholder("Settings — Phase 7"));
+        tabbedPane.addTab("Settings", settingsTab);
 
         // Wire Library → Compare (after tabbedPane is ready)
         libraryTab.setAccountRepository(accountRepo);
@@ -102,13 +104,4 @@ public class MainTab {
         tabbedPane.setSelectedIndex(TAB_ACCOUNTS);
     }
 
-    private JPanel placeholder(String text) {
-        JPanel p = new JPanel(new GridBagLayout());
-        JLabel l = new JLabel(text + " (coming soon)");
-        l.setFont(l.getFont().deriveFont(Font.ITALIC, 13f));
-        l.setForeground(UIManager.getColor("Label.disabledForeground"));
-        p.add(l);
-        api.userInterface().applyThemeToComponent(p);
-        return p;
-    }
 }

@@ -1,83 +1,56 @@
 package ui;
 
 import burp.api.montoya.MontoyaApi;
+import capture.CaptureService;
 import db.DatabaseManager;
+import db.FolderRepository;
+import db.TestCaseRepository;
 
 import javax.swing.*;
 import java.awt.*;
 
 /**
- * Root Burp suite tab — "BAC Time-Machine".
- * Phase 1: placeholder panel confirming the extension and database are live.
- * Phases 2-7 will replace the center content with the full sub-tab UI
- * (Library / Accounts / Test Run / Compare / Settings).
- *
- * Registered via api.userInterface().registerSuiteTab(caption(), uiComponent())
- * because Montoya 2026.4 takes (String, Component) directly — no SuiteTab interface.
+ * Root "BAC Time-Machine" Burp suite tab.
+ * Hosts sub-tabs: Library | Accounts | Test Run | Compare | Settings.
+ * Phases 3-7 will replace the placeholder panels for each sub-tab.
  */
 public class MainTab {
 
     private final MontoyaApi api;
-    private final DatabaseManager dbManager;
-    private final JPanel root;
+    private final JTabbedPane tabbedPane;
+    private final LibraryTab libraryTab;
 
-    public MainTab(MontoyaApi api, DatabaseManager dbManager) {
+    public MainTab(MontoyaApi api, DatabaseManager db, CaptureService captureService) {
         this.api = api;
-        this.dbManager = dbManager;
-        this.root = buildPlaceholder();
+
+        FolderRepository folderRepo = new FolderRepository(db);
+        TestCaseRepository tcRepo   = new TestCaseRepository(db);
+
+        libraryTab = new LibraryTab(api, folderRepo, tcRepo, captureService);
+
+        tabbedPane = new JTabbedPane();
+        tabbedPane.addTab("Library",    libraryTab);
+        tabbedPane.addTab("Accounts",   placeholder("Accounts — Phase 3"));
+        tabbedPane.addTab("Test Run",   placeholder("Test Run — Phase 4"));
+        tabbedPane.addTab("Compare",    placeholder("Compare — Phase 5"));
+        tabbedPane.addTab("Settings",   placeholder("Settings — Phase 7"));
+
+        api.userInterface().applyThemeToComponent(tabbedPane);
     }
 
-    private JPanel buildPlaceholder() {
-        JPanel panel = new JPanel(new GridBagLayout());
-        panel.setBorder(BorderFactory.createEmptyBorder(24, 24, 24, 24));
+    public String caption()       { return "BAC Time-Machine"; }
+    public Component uiComponent() { return tabbedPane; }
 
-        JPanel card = new JPanel();
-        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
-        card.setBorder(BorderFactory.createEmptyBorder(32, 48, 32, 48));
+    /** Refresh the Library tab — called after external saves. */
+    public void refreshLibrary() { libraryTab.refresh(); }
 
-        JLabel title = new JLabel("BAC Time-Machine");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 22f));
-        title.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        JLabel subtitle = new JLabel("Broken Access Control Testing Extension");
-        subtitle.setFont(subtitle.getFont().deriveFont(13f));
-        subtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        JSeparator sep = new JSeparator();
-        sep.setMaximumSize(new Dimension(300, 2));
-        sep.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        JLabel dbStatus = new JLabel("✓  Database initialised");
-        dbStatus.setFont(dbStatus.getFont().deriveFont(Font.PLAIN, 12f));
-        dbStatus.setForeground(new Color(0x2e7d32));
-        dbStatus.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        JLabel phase = new JLabel("Phase 1 complete — UI implementation in progress");
-        phase.setFont(phase.getFont().deriveFont(Font.ITALIC, 11f));
-        phase.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-        card.add(title);
-        card.add(Box.createVerticalStrut(6));
-        card.add(subtitle);
-        card.add(Box.createVerticalStrut(16));
-        card.add(sep);
-        card.add(Box.createVerticalStrut(16));
-        card.add(dbStatus);
-        card.add(Box.createVerticalStrut(8));
-        card.add(phase);
-
-        panel.add(card);
-
-        api.userInterface().applyThemeToComponent(panel);
-        api.userInterface().applyThemeToComponent(card);
-        return panel;
-    }
-
-    public String caption() {
-        return "BAC Time-Machine";
-    }
-
-    public Component uiComponent() {
-        return root;
+    private JPanel placeholder(String text) {
+        JPanel p = new JPanel(new GridBagLayout());
+        JLabel l = new JLabel(text + " (coming soon)");
+        l.setFont(l.getFont().deriveFont(Font.ITALIC, 13f));
+        l.setForeground(UIManager.getColor("Label.disabledForeground"));
+        p.add(l);
+        api.userInterface().applyThemeToComponent(p);
+        return p;
     }
 }

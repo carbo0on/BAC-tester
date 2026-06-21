@@ -40,9 +40,13 @@ public class CaptureService {
 
     /** Quick-save a single request to Inbox with no metadata dialog. */
     public void quickSaveToInbox(HttpRequestResponse reqResp) {
-        if (reqResp == null || !reqResp.hasResponse()) {
-            api.logging().logToOutput("[BAC] Quick-save skipped: no response available.");
+        if (reqResp == null || reqResp.request() == null) {
+            api.logging().logToOutput("[BAC] Quick-save skipped: no request available.");
             return;
+        }
+        if (!reqResp.hasResponse()) {
+            api.logging().logToOutput("[BAC] Quick-save: request has no response yet "
+                + "(captured with empty baseline — re-baseline later to fill it).");
         }
         SaveRequest req = buildSaveRequest(reqResp, null, null, null, null);
         submit(req);
@@ -52,8 +56,8 @@ public class CaptureService {
     public void saveWithMetadata(HttpRequestResponse reqResp,
                                  String name, Long folderId,
                                  Long ownerAccountId, String notes) {
-        if (reqResp == null || !reqResp.hasResponse()) {
-            api.logging().logToOutput("[BAC] Save skipped: no response available.");
+        if (reqResp == null || reqResp.request() == null) {
+            api.logging().logToOutput("[BAC] Save skipped: no request available.");
             return;
         }
         SaveRequest req = buildSaveRequest(reqResp, name, folderId, ownerAccountId, notes);
@@ -79,13 +83,14 @@ public class CaptureService {
                                          String name, Long folderId,
                                          Long ownerAccountId, String notes) {
         var req = reqResp.request();
-        var resp = reqResp.response();
         var svc = req.httpService();
+        boolean hasResp = reqResp.hasResponse() && reqResp.response() != null;
 
         byte[] requestRaw  = req.toByteArray().getBytes();
-        byte[] responseRaw = resp.toByteArray().getBytes();
-        int status         = resp.statusCode();
-        int length         = resp.body() != null ? resp.body().length() : 0;
+        byte[] responseRaw = hasResp ? reqResp.response().toByteArray().getBytes() : new byte[0];
+        int status         = hasResp ? reqResp.response().statusCode() : 0;
+        int length         = hasResp && reqResp.response().body() != null
+            ? reqResp.response().body().length() : 0;
 
         return new SaveRequest(
             name,

@@ -30,7 +30,9 @@ public class TestCaseRepository {
         String ownerName,
         Integer primaryBaselineStatus,
         Integer primaryBaselineLength,
-        long capturedAt
+        long capturedAt,
+        String notes,
+        String colorTag
     ) {}
 
     public record BaselineRecord(
@@ -74,6 +76,11 @@ public class TestCaseRepository {
             conn.setAutoCommit(false);
             long now = Instant.now().getEpochSecond();
             boolean isStateChanging = isStateChangingMethod(req.method());
+            // Coerce a missing response to an empty baseline so requests captured
+            // from Repeater before they are sent can still be saved.
+            byte[] responseRaw = req.responseRaw() != null ? req.responseRaw() : new byte[0];
+            byte[] requestRaw  = req.requestRaw()  != null ? req.requestRaw()  : new byte[0];
+            String baselineLabel = responseRaw.length == 0 ? "no-response" : "original";
 
             // 1. Insert test case
             String insertTc = """
@@ -93,7 +100,7 @@ public class TestCaseRepository {
                 ps.setString(7, req.host());
                 ps.setInt(8, req.port());
                 ps.setInt(9, req.isHttps() ? 1 : 0);
-                ps.setBytes(10, req.requestRaw());
+                ps.setBytes(10, requestRaw);
                 ps.setInt(11, isStateChanging ? 1 : 0);
                 ps.setLong(12, now);
                 ps.setLong(13, now);
@@ -107,17 +114,18 @@ public class TestCaseRepository {
             String insertBl = """
                 INSERT INTO baselines
                     (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
-                VALUES (?, ?, 'original', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """;
             long blId;
             try (PreparedStatement ps = conn.prepareStatement(insertBl, Statement.RETURN_GENERATED_KEYS)) {
                 ps.setLong(1, tcId);
                 if (req.ownerAccountId() != null) ps.setLong(2, req.ownerAccountId()); else ps.setNull(2, Types.INTEGER);
-                ps.setInt(3, req.responseStatus());
-                ps.setInt(4, req.responseLength());
-                ps.setString(5, sha256(req.responseRaw()));
-                ps.setBytes(6, req.responseRaw());
-                ps.setLong(7, now);
+                ps.setString(3, baselineLabel);
+                ps.setInt(4, req.responseStatus());
+                ps.setInt(5, req.responseLength());
+                ps.setString(6, sha256(responseRaw));
+                ps.setBytes(7, responseRaw);
+                ps.setLong(8, now);
                 ps.executeUpdate();
                 try (ResultSet rs = ps.getGeneratedKeys()) {
                     blId = rs.next() ? rs.getLong(1) : -1;
@@ -276,6 +284,37 @@ public class TestCaseRepository {
         }
     }
 
+    public synchronized void setNotes(long id, String notes) throws SQLException {
+        String sql = "UPDATE test_cases SET notes = ?, updated_at = ? WHERE id = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, notes);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** Set (or clear with null) a manual color tag like "RED"/"ORANGE"/"GREEN"/"BLUE". */
+    public synchronized void setColorTag(long id, String colorTag) throws SQLException {
+        String sql = "UPDATE test_cases SET color_tag = ?, updated_at = ? WHERE id = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setString(1, colorTag);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, id);
+            ps.executeUpdate();
+        }
+    }
+
+    public synchronized String getNotes(long id) throws SQLException {
+        String sql = "SELECT notes FROM test_cases WHERE id = ?";
+        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("notes") : null;
+            }
+        }
+    }
+
     public synchronized void moveToFolder(long id, Long folderId) throws SQLException {
         String sql = "UPDATE test_cases SET folder_id = ?, updated_at = ? WHERE id = ?";
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -319,7 +358,7 @@ public class TestCaseRepository {
                    tc.is_https, tc.is_state_changing, tc.folder_id, tc.owner_acct_id,
                    a.name AS owner_name,
                    b.status AS bl_status, b.length AS bl_length,
-                   tc.created_at
+                   tc.created_at, tc.notes, tc.color_tag
             FROM test_cases tc
             LEFT JOIN accounts a ON a.id = tc.owner_acct_id
             LEFT JOIN baselines b ON b.id = tc.primary_baseline_id
@@ -353,7 +392,9 @@ public class TestCaseRepository {
                         rs.getString("owner_name"),
                         blStatusVal,
                         blLenVal,
-                        rs.getLong("created_at")
+                        rs.getLong("created_at"),
+                        rs.getString("notes"),
+                        rs.getString("color_tag")
                     ));
                 }
             }

@@ -30,3 +30,11 @@ tasks.shadowJar {
 tasks.named("assemble") {
     dependsOn(tasks.named("shadowJar"))
 }
+
+// The plain `jar` task produces a THIN jar without sqlite-jdbc/gson, which fails
+// to load in Burp (NoClassDefFoundError: org.sqlite.JDBC). Chain it to shadowJar
+// so the documented `./gradlew jar` always yields the loadable fat jar
+// at build/libs/bac-timemachine.jar.
+tasks.named("jar") {
+    finalizedBy(tasks.named("shadowJar"))
+}

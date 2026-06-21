@@ -143,7 +143,7 @@ public class TestRunTab extends JPanel {
         scopeCombo.setPreferredSize(new Dimension(220, 26));
         top.add(scopeCombo);
 
-        safeModeCheck = new JCheckBox("Safe Mode", true);
+        safeModeCheck = new JCheckBox("Safe Mode", !"false".equalsIgnoreCase(readSetting("safe_mode")));
         safeModeCheck.setToolTipText("Skip state-changing requests (POST/PUT/PATCH/DELETE)");
         top.add(safeModeCheck);
 
@@ -394,10 +394,13 @@ public class TestRunTab extends JPanel {
             return;
         }
 
-        int confirm = JOptionPane.showConfirmDialog(this,
-            "Run " + ids.size() + " test case(s) as account \"" + acctItem.name + "\"?",
-            "Start Run", JOptionPane.OK_CANCEL_OPTION);
-        if (confirm != JOptionPane.OK_OPTION) return;
+        boolean confirmBeforeRun = !"false".equalsIgnoreCase(readSetting("confirm_before_run"));
+        if (confirmBeforeRun) {
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "Run " + ids.size() + " test case(s) as account \"" + acctItem.name + "\"?",
+                "Start Run", JOptionPane.OK_CANCEL_OPTION);
+            if (confirm != JOptionPane.OK_OPTION) return;
+        }
 
         prepareRunUI(ids.size());
         engine.startRun(acctItem.id, ids, safeModeCheck.isSelected(), readMatchThreshold());

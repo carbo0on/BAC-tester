@@ -46,6 +46,10 @@ public class RunEngine {
 
     private volatile boolean running = false;
 
+    // Loaded from settings at the start of each run
+    private volatile double greyLowerBound = 60.0;
+    private volatile String scopeEnforcement = "WARN"; // WARN / BLOCK / OFF
+
     public RunEngine(MontoyaApi api, DatabaseManager dbManager) {
         this.api         = api;
         this.dbManager   = dbManager;
@@ -76,6 +80,7 @@ public class RunEngine {
                          boolean safeMode, double matchThreshold) {
         if (running) return;
         running = true;
+        loadRunSettings();
         executor.submit(() -> {
             long runId = -1;
             try {
@@ -113,6 +118,17 @@ public class RunEngine {
         });
     }
 
+    private void loadRunSettings() {
+        try {
+            String lb = dbManager.getSetting("review_lower_bound");
+            if (lb != null) greyLowerBound = Double.parseDouble(lb);
+        } catch (Exception ignored) {}
+        try {
+            String se = dbManager.getSetting("scope_enforcement");
+            if (se != null) scopeEnforcement = se;
+        } catch (Exception ignored) {}
+    }
+
     // ---- Canary check --------------------------------------------------
 
     private boolean checkCanary(AccountRepository.AccountRecord account) {
@@ -137,9 +153,7 @@ public class RunEngine {
     private void processOne(long runId, long tcId,
                             AccountRepository.AccountRecord account,
                             boolean safeMode, double matchThreshold) throws SQLException {
-        List<TestCaseRepository.TestCaseRow> rows = tcRepo.getAll();
-        TestCaseRepository.TestCaseRow tc = rows.stream()
-            .filter(r -> r.id() == tcId).findFirst().orElse(null);
+        TestCaseRepository.TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
         if (tc == null) return;
 
         // Safe mode: skip state-changing requests
@@ -161,8 +175,14 @@ public class RunEngine {
         }
 
         try {
-            // Scope check — warn but do not block (user may test out-of-scope intentionally)
-            if (!api.scope().isInScope(tc.url())) {
+            // Scope enforcement: OFF (ignore) / WARN (log) / BLOCK (skip)
+            if (!"OFF".equalsIgnoreCase(scopeEnforcement) && !api.scope().isInScope(tc.url())) {
+                if ("BLOCK".equalsIgnoreCase(scopeEnforcement)) {
+                    api.logging().logToOutput("[BAC] Blocked (out of scope): " + tc.url());
+                    saveResult(runId, tc, account, baselineId > 0 ? baselineId : null,
+                               0, 0, "", new byte[0], 0.0, ERROR);
+                    return;
+                }
                 api.logging().logToOutput("[BAC] Warning: " + tc.url() + " is out of scope. Proceeding anyway.");
             }
 
@@ -188,7 +208,7 @@ public class RunEngine {
             String expectedAccess = account.expectedAccess() != null ? account.expectedAccess() : "UNKNOWN";
             String verdict = computeVerdict(
                 newStatus, tc.primaryBaselineStatus() != null ? tc.primaryBaselineStatus() : 0,
-                similarity, matchThreshold, expectedAccess
+                similarity, matchThreshold, expectedAccess, greyLowerBound
             );
 
             saveResult(runId, tc, account,
@@ -302,8 +322,14 @@ public class RunEngine {
     public static String computeVerdict(int newStatus, int origStatus,
                                         double similarity, double threshold,
                                         String expectedAccess) {
+        return computeVerdict(newStatus, origStatus, similarity, threshold, expectedAccess, 60.0);
+    }
+
+    public static String computeVerdict(int newStatus, int origStatus,
+                                        double similarity, double threshold,
+                                        String expectedAccess, double greyLowerBound) {
         boolean isMatch = (newStatus == origStatus) && (similarity >= threshold);
-        boolean isGrey  = similarity >= 60 && similarity < threshold; // ambiguous zone
+        boolean isGrey  = similarity >= greyLowerBound && similarity < threshold; // ambiguous zone
 
         return switch (expectedAccess.toUpperCase()) {
             case "DENIED" -> {

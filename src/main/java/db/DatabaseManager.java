@@ -44,7 +44,35 @@ public class DatabaseManager {
         }
 
         createSchema();
+        migrateSchema();
         insertDefaultSettings();
+    }
+
+    /**
+     * Applies additive, idempotent schema migrations for databases created by
+     * earlier versions of the extension. SQLite lacks "ADD COLUMN IF NOT EXISTS",
+     * so each column is checked via pragma table_info before being added.
+     */
+    private void migrateSchema() throws SQLException {
+        addColumnIfMissing("test_cases", "color_tag", "TEXT");
+        // notes already exists in the base schema, but guard for very old DBs
+        addColumnIfMissing("test_cases", "notes", "TEXT");
+    }
+
+    private void addColumnIfMissing(String table, String column, String type) throws SQLException {
+        boolean exists = false;
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) { exists = true; break; }
+            }
+        }
+        if (!exists) {
+            try (Statement st = connection.createStatement()) {
+                st.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+                logging.logToOutput("[BAC] Migration: added column " + table + "." + column);
+            }
+        }
     }
 
     private void createSchema() throws SQLException {
@@ -167,7 +195,16 @@ public class DatabaseManager {
                 {"ignore_patterns",  "[\"\\\\d{10,13}\",\"csrf[_-]?token=[^&\\\\s]+\",\"nonce=[^&\\\\s]+\"]"},
                 {"safe_mode",        "true"},
                 {"font_size",        "12"},
-                {"hotkey_combo",     "Ctrl+Alt+A"}
+                {"hotkey_combo",     "Ctrl+Alt+A"},
+                // Phase 7.1 additions
+                {"coloring_mode",    "AUTO"},   // AUTO (by method) / MANUAL / OFF
+                {"review_lower_bound", "60"},    // grey-zone lower bound for REVIEW verdict
+                {"diff_size_cap_kb", "300"},     // max KB compared in Compare tab
+                {"default_expected_access", "UNKNOWN"},
+                {"auto_expand_folders", "true"},
+                {"confirm_before_run", "true"},
+                {"scope_enforcement", "WARN"},   // WARN / BLOCK / OFF
+                {"dedup_on_import",  "true"}
             };
             for (String[] kv : defaults) {
                 ps.setString(1, kv[0]);

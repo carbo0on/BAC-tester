@@ -119,16 +119,33 @@ public class AccountsTab extends JPanel {
         listButtons.add(delBtn);
         leftPanel.add(listButtons, BorderLayout.SOUTH);
 
-        // --- Right panel: editor ---
+        // --- Right panel: scrollable editor + fixed action bar ---
         JPanel editorPanel = buildEditor();
+        JScrollPane editorScroll = new JScrollPane(editorPanel);
+        editorScroll.getVerticalScrollBar().setUnitIncrement(16);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, new JScrollPane(editorPanel));
+        JPanel rightSide = new JPanel(new BorderLayout());
+        rightSide.add(editorScroll, BorderLayout.CENTER);
+        rightSide.add(buildActionBar(), BorderLayout.SOUTH); // always visible, never scrolled away
+
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightSide);
         split.setDividerLocation(200);
         split.setDividerSize(4);
 
         add(split, BorderLayout.CENTER);
 
         api.userInterface().applyThemeToComponent(this);
+    }
+
+    /** Fixed bottom bar holding Save/Cancel so they are never scrolled out of view. */
+    private JPanel buildActionBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
+        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0,
+            UIManager.getColor("Separator.foreground")));
+        saveBtn.setFont(saveBtn.getFont().deriveFont(Font.BOLD));
+        bar.add(cancelBtn);
+        bar.add(saveBtn);
+        return bar;
     }
 
     private JPanel buildEditor() {
@@ -203,12 +220,11 @@ public class AccountsTab extends JPanel {
         fullRow.gridy = row++;
         p.add(note, fullRow);
 
-        // Buttons
-        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
-        btnRow.add(cancelBtn);
-        btnRow.add(saveBtn);
-        fullRow.gridy = row++; fullRow.insets = new Insets(12, 0, 0, 0);
-        p.add(btnRow, fullRow);
+        // Filler so content stays top-aligned within the scroll viewport
+        GridBagConstraints filler = new GridBagConstraints();
+        filler.gridx = 0; filler.gridy = row; filler.gridwidth = 2;
+        filler.weighty = 1.0; filler.fill = GridBagConstraints.BOTH;
+        p.add(Box.createGlue(), filler);
 
         return p;
     }
@@ -237,8 +253,11 @@ public class AccountsTab extends JPanel {
         btns.add(addRow);
         btns.add(delRow);
 
+        JScrollPane tblScroll = new JScrollPane(tbl);
+        tblScroll.setPreferredSize(new Dimension(420, 120));
+
         JPanel panel = new JPanel(new BorderLayout(0, 2));
-        panel.add(new JScrollPane(tbl), BorderLayout.CENTER);
+        panel.add(tblScroll, BorderLayout.CENTER);
         panel.add(btns, BorderLayout.SOUTH);
         return panel;
     }
@@ -321,14 +340,25 @@ public class AccountsTab extends JPanel {
 
         bg.submit(() -> {
             try {
+                final long savedId;
                 if (acctId == null) {
-                    long newId = accountRepo.create(name, roleDesc, cookies, headers, expectedAccess);
-                    if (canaryId != null) accountRepo.setCanary(newId, canaryId);
+                    savedId = accountRepo.create(name, roleDesc, cookies, headers, expectedAccess);
+                    if (canaryId != null) accountRepo.setCanary(savedId, canaryId);
                 } else {
                     accountRepo.update(acctId, name, roleDesc, cookies, headers, expectedAccess);
                     accountRepo.setCanary(acctId, canaryId);
+                    savedId = acctId;
                 }
-                SwingUtilities.invokeLater(this::loadAccounts);
+                List<AccountRecord> accounts = accountRepo.getAll();
+                SwingUtilities.invokeLater(() -> {
+                    allAccounts = accounts;
+                    listModel.clear();
+                    accounts.forEach(listModel::addElement);
+                    for (int i = 0; i < listModel.size(); i++) {
+                        if (listModel.get(i).id() == savedId) { accountList.setSelectedIndex(i); break; }
+                    }
+                    editorTitle.setText("Saved ✓  —  " + name);
+                });
             } catch (Exception ex) {
                 api.logging().logToError("[BAC] Save account failed: " + ex.getMessage());
                 SwingUtilities.invokeLater(() ->

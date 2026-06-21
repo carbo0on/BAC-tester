@@ -1,5 +1,6 @@
 plugins {
     id("java")
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 repositories {
@@ -8,6 +9,7 @@ repositories {
 
 dependencies {
     compileOnly("net.portswigger.burp.extensions:montoya-api:2026.4")
+    implementation("org.xerial:sqlite-jdbc:3.45.3.0")
 }
 
 tasks.withType<JavaCompile> {
@@ -16,8 +18,14 @@ tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
 }
 
-tasks.jar {
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from(configurations.runtimeClasspath.get().filter { it.isDirectory })
-    from(configurations.runtimeClasspath.get().filterNot { it.isDirectory }.map { zipTree(it) })
+tasks.shadowJar {
+    archiveBaseName.set("bac-timemachine")
+    archiveClassifier.set("")
+    archiveVersion.set("")
+    mergeServiceFiles()
+}
+
+// Make 'build' also produce the fat shadow jar
+tasks.named("assemble") {
+    dependsOn(tasks.named("shadowJar"))
 }

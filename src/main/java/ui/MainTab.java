@@ -54,6 +54,7 @@ public class MainTab {
         tabbedPane.addTab("Settings", placeholder("Settings — Phase 7"));
 
         // Wire Library → Compare (after tabbedPane is ready)
+        libraryTab.setAccountRepository(accountRepo);
         libraryTab.setOnAddToWorkingSet(ids -> {
             compareTab.addToWorkingSet(ids);
             tabbedPane.setSelectedIndex(TAB_COMPARE);
@@ -61,6 +62,10 @@ public class MainTab {
         libraryTab.setOnOpenInCompare(id -> {
             compareTab.openTestCase(id);
             tabbedPane.setSelectedIndex(TAB_COMPARE);
+        });
+        libraryTab.setOnRunSelected((accountId, tcIds) -> {
+            testRunTab.startRunDirectly(accountId, tcIds);
+            tabbedPane.setSelectedIndex(TAB_TESTRUN);
         });
 
         // Wire TestRun → Compare

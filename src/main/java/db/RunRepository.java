@@ -197,6 +197,53 @@ public class RunRepository {
         }
     }
 
+    // ---- Overview Matrix -----------------------------------------------
+
+    public record MatrixCell(
+        long testCaseId, String testCaseName, String method, String host,
+        long accountId,  String accountName,
+        int newStatus, double similarity, String verdict, long resultId
+    ) {}
+
+    /**
+     * Returns the latest result per (test_case_id, account_id) pair — used by
+     * the Overview Matrix to give a cross-account bird's-eye view.
+     */
+    public synchronized List<MatrixCell> getLatestResultMatrix() throws SQLException {
+        String sql = """
+            SELECT r.test_case_id, tc.name AS tc_name, tc.method, tc.host,
+                   r.account_id, a.name AS account_name,
+                   r.new_status, r.similarity, r.verdict, r.id AS result_id
+            FROM results r
+            JOIN test_cases tc ON tc.id = r.test_case_id
+            LEFT JOIN accounts a ON a.id = r.account_id
+            WHERE r.id IN (
+                SELECT MAX(r2.id) FROM results r2
+                GROUP BY r2.test_case_id, r2.account_id
+            )
+            ORDER BY tc.name, a.name
+            """;
+        List<MatrixCell> result = new ArrayList<>();
+        try (Statement st = db.getConnection().createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                result.add(new MatrixCell(
+                    rs.getLong("test_case_id"),
+                    rs.getString("tc_name"),
+                    rs.getString("method"),
+                    rs.getString("host"),
+                    rs.getLong("account_id"),
+                    rs.getString("account_name"),
+                    rs.getInt("new_status"),
+                    rs.getDouble("similarity"),
+                    rs.getString("verdict"),
+                    rs.getLong("result_id")
+                ));
+            }
+        }
+        return result;
+    }
+
     public synchronized List<ResultRecord> getResultsForRun(long runId) throws SQLException {
         String sql = """
             SELECT r.id, r.run_id, r.test_case_id, tc.name AS tc_name,

@@ -8,6 +8,9 @@ import db.RunRepository;
 import db.TestCaseRepository;
 import engine.RunEngine;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import javax.swing.*;
 import javax.swing.table.*;
 import java.awt.*;
@@ -82,6 +85,13 @@ public class TestRunTab extends JPanel {
     private JTable resultsTable;
     private String activeVerdictFilter = null;
 
+    // Verdict summary counts (updated as results stream in)
+    private final Map<String, Integer> verdictCounts = new HashMap<>();
+    private final Map<String, JLabel> verdictCountLabels = new HashMap<>();
+
+    // Overview matrix
+    private OverviewMatrix overviewMatrix;
+
     // Async loader for UI data
     private final ExecutorService loader = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "bac-testrun-loader");
@@ -107,7 +117,7 @@ public class TestRunTab extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
         add(buildConfigPanel(), BorderLayout.NORTH);
-        add(buildResultsPanel(), BorderLayout.CENTER);
+        add(buildMainArea(), BorderLayout.CENTER);
 
         wireEngine();
         refreshAccounts();
@@ -171,6 +181,97 @@ public class TestRunTab extends JPanel {
         api.userInterface().applyThemeToComponent(top);
         api.userInterface().applyThemeToComponent(progressRow);
         return panel;
+    }
+
+    /** Builds the CENTER area: verdict summary + JTabbedPane(Results, Matrix). */
+    private JPanel buildMainArea() {
+        JPanel area = new JPanel(new BorderLayout(0, 4));
+        area.add(buildVerdictSummary(), BorderLayout.NORTH);
+
+        // Results sub-panel
+        JPanel resultsPanel = buildResultsPanel();
+
+        // Matrix sub-panel
+        overviewMatrix = new OverviewMatrix(new db.RunRepository(dbManager), api);
+        overviewMatrix.setOnOpenInCompare(tcId -> {
+            if (onOpenInCompare != null) onOpenInCompare.accept(tcId);
+        });
+
+        JTabbedPane subTabs = new JTabbedPane();
+        subTabs.addTab("Results", resultsPanel);
+        subTabs.addTab("Matrix",  overviewMatrix);
+        // Refresh matrix when switching to its tab
+        subTabs.addChangeListener(e -> {
+            if (subTabs.getSelectedIndex() == 1) overviewMatrix.refresh();
+        });
+        api.userInterface().applyThemeToComponent(subTabs);
+
+        area.add(subTabs, BorderLayout.CENTER);
+        api.userInterface().applyThemeToComponent(area);
+        return area;
+    }
+
+    private JPanel buildVerdictSummary() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
+        bar.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
+            BorderFactory.createEmptyBorder(2, 4, 2, 4)));
+
+        // Initialize counts and create one chip per verdict
+        String[][] verdictDefs = {
+            {RunEngine.POTENTIAL_BAC,   "🚩 BAC",     "CC2222"},
+            {RunEngine.ANOMALY,         "⚠ ANOMALY",  "CC7700"},
+            {RunEngine.REVIEW,          "🔍 REVIEW",  "AA9900"},
+            {RunEngine.LIKELY_ENFORCED, "✅ ENFORCED","227722"},
+            {RunEngine.EXPECTED_OK,     "⚪ OK",       "777777"},
+            {RunEngine.SKIPPED_SAFE,    "— SKIPPED",  "555555"},
+            {RunEngine.ERROR,           "✗ ERROR",    "882288"},
+        };
+        for (String[] def : verdictDefs) {
+            verdictCounts.put(def[0], 0);
+            JLabel chip = new JLabel(def[1] + ": 0");
+            chip.setFont(chip.getFont().deriveFont(11f));
+            chip.setBorder(BorderFactory.createEmptyBorder(1, 5, 1, 5));
+            chip.setForeground(new Color(Integer.parseInt(def[2], 16)));
+            verdictCountLabels.put(def[0], chip);
+            bar.add(chip);
+        }
+        api.userInterface().applyThemeToComponent(bar);
+        return bar;
+    }
+
+    private void incrementVerdictCount(String verdict) {
+        verdictCounts.merge(verdict, 1, Integer::sum);
+        JLabel lbl = verdictCountLabels.get(verdict);
+        if (lbl == null) return;
+        String display = switch (verdict) {
+            case RunEngine.POTENTIAL_BAC   -> "🚩 BAC";
+            case RunEngine.ANOMALY         -> "⚠ ANOMALY";
+            case RunEngine.REVIEW          -> "🔍 REVIEW";
+            case RunEngine.LIKELY_ENFORCED -> "✅ ENFORCED";
+            case RunEngine.EXPECTED_OK     -> "⚪ OK";
+            case RunEngine.SKIPPED_SAFE    -> "— SKIPPED";
+            case RunEngine.ERROR           -> "✗ ERROR";
+            default -> verdict;
+        };
+        lbl.setText(display + ": " + verdictCounts.get(verdict));
+    }
+
+    private void resetVerdictCounts() {
+        verdictCounts.replaceAll((k, v) -> 0);
+        for (var entry : verdictCountLabels.entrySet()) {
+            String display = switch (entry.getKey()) {
+                case RunEngine.POTENTIAL_BAC   -> "🚩 BAC";
+                case RunEngine.ANOMALY         -> "⚠ ANOMALY";
+                case RunEngine.REVIEW          -> "🔍 REVIEW";
+                case RunEngine.LIKELY_ENFORCED -> "✅ ENFORCED";
+                case RunEngine.EXPECTED_OK     -> "⚪ OK";
+                case RunEngine.SKIPPED_SAFE    -> "— SKIPPED";
+                case RunEngine.ERROR           -> "✗ ERROR";
+                default -> entry.getKey();
+            };
+            entry.getValue().setText(display + ": 0");
+        }
     }
 
     private JPanel buildResultsPanel() {
@@ -240,7 +341,10 @@ public class TestRunTab extends JPanel {
         );
 
         engine.setOnResult(result ->
-            SwingUtilities.invokeLater(() -> tableModel.addResult(result))
+            SwingUtilities.invokeLater(() -> {
+                tableModel.addResult(result);
+                incrementVerdictCount(result.verdict());
+            })
         );
 
         engine.setOnFinished((runId, error) ->
@@ -255,12 +359,25 @@ public class TestRunTab extends JPanel {
                 } else {
                     statusLabel.setText("✓ Done — run #" + runId);
                     statusLabel.setForeground(new Color(0, 140, 0));
+                    // Auto-refresh matrix in background
+                    if (overviewMatrix != null) overviewMatrix.refresh();
                 }
             })
         );
     }
 
     // ---- Run -----------------------------------------------------------
+
+    /** Called from Library's "Run on selected ▶" to start a run without the confirm dialog. */
+    public void startRunDirectly(long accountId, List<Long> tcIds) {
+        if (engine.isRunning()) {
+            JOptionPane.showMessageDialog(this, "A run is already in progress.",
+                "Busy", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        prepareRunUI(tcIds.size());
+        engine.startRun(accountId, tcIds, safeModeCheck.isSelected(), readMatchThreshold());
+    }
 
     private void startRun() {
         AccountItem acctItem = (AccountItem) accountCombo.getSelectedItem();
@@ -282,17 +399,20 @@ public class TestRunTab extends JPanel {
             "Start Run", JOptionPane.OK_CANCEL_OPTION);
         if (confirm != JOptionPane.OK_OPTION) return;
 
+        prepareRunUI(ids.size());
+        engine.startRun(acctItem.id, ids, safeModeCheck.isSelected(), readMatchThreshold());
+    }
+
+    private void prepareRunUI(int total) {
         tableModel.clear();
+        resetVerdictCounts();
         runBtn.setEnabled(false);
         stopBtn.setEnabled(true);
         progressBar.setValue(0);
-        progressBar.setMaximum(ids.size());
-        progressBar.setString("0 / " + ids.size());
+        progressBar.setMaximum(total);
+        progressBar.setString("0 / " + total);
         statusLabel.setText("Running…");
         statusLabel.setForeground(UIManager.getColor("Label.foreground"));
-
-        double threshold = readMatchThreshold();
-        engine.startRun(acctItem.id, ids, safeModeCheck.isSelected(), threshold);
     }
 
     private double readMatchThreshold() {

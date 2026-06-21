@@ -2,6 +2,8 @@ package ui;
 
 import burp.api.montoya.MontoyaApi;
 import capture.CaptureService;
+import db.AccountRepository;
+import db.AccountRepository.AccountRecord;
 import db.FolderRepository;
 import db.FolderRepository.FolderRecord;
 import db.TestCaseRepository;
@@ -17,6 +19,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -32,6 +35,7 @@ public class LibraryTab extends JPanel {
     private final FolderRepository folderRepo;
     private final TestCaseRepository tcRepo;
     private final CaptureService captureService;
+    private AccountRepository accountRepo;
 
     // UI components
     private final JTree folderTree;
@@ -41,6 +45,8 @@ public class LibraryTab extends JPanel {
     private final JTable table;
     private final JLabel statusLabel;
     private final JPanel actionBar;
+    private JComboBox<String> sessionCombo;
+    private final List<Long> sessionAccountIds = new ArrayList<>();
 
     // Background loader
     private final ExecutorService loader = Executors.newSingleThreadExecutor(r -> {
@@ -53,12 +59,19 @@ public class LibraryTab extends JPanel {
     private Long selectedFolderIdState = null; // null = Inbox
     private boolean showAll = false;
 
-    // Callbacks wired by MainTab in Phase 5
+    // Callbacks wired by MainTab
     private Consumer<List<Long>> onAddToWorkingSet;
     private Consumer<Long>       onOpenInCompare;
+    private BiConsumer<Long, List<Long>> onRunSelected; // (accountId, tcIds)
 
     public void setOnAddToWorkingSet(Consumer<List<Long>> cb) { this.onAddToWorkingSet = cb; }
     public void setOnOpenInCompare(Consumer<Long> cb)         { this.onOpenInCompare = cb; }
+    public void setOnRunSelected(BiConsumer<Long, List<Long>> cb) { this.onRunSelected = cb; }
+
+    public void setAccountRepository(AccountRepository repo) {
+        this.accountRepo = repo;
+        refreshSessionCombo();
+    }
 
     public LibraryTab(MontoyaApi api, FolderRepository folderRepo,
                       TestCaseRepository tcRepo, CaptureService captureService) {
@@ -134,6 +147,7 @@ public class LibraryTab extends JPanel {
 
     /** Reload folder tree + test case table from DB. */
     public void refresh() {
+        refreshSessionCombo();
         loader.submit(() -> {
             try {
                 List<FolderRecord> folders = folderRepo.getAllFolders();
@@ -350,6 +364,7 @@ public class LibraryTab extends JPanel {
         bar.setVisible(false); // hidden until rows are selected
 
         JLabel selLabel = new JLabel("0 selected");
+
         JButton addToWorkingSet = new JButton("Add to Working Set");
         addToWorkingSet.setToolTipText("Add selected test cases to Compare tab working set");
         addToWorkingSet.addActionListener(e -> {
@@ -360,10 +375,53 @@ public class LibraryTab extends JPanel {
             onAddToWorkingSet.accept(ids);
         });
 
+        sessionCombo = new JComboBox<>();
+        sessionCombo.setToolTipText("Select account/session to run against");
+        sessionCombo.setPreferredSize(new Dimension(160, sessionCombo.getPreferredSize().height));
+
+        JButton runBtn = new JButton("Run on selected ▶");
+        runBtn.setToolTipText("Run the chosen session against all selected test cases");
+        runBtn.addActionListener(e -> {
+            int[] rows = table.getSelectedRows();
+            if (rows.length == 0) return;
+            int comboIdx = sessionCombo.getSelectedIndex();
+            if (comboIdx < 0 || comboIdx >= sessionAccountIds.size()) {
+                JOptionPane.showMessageDialog(this, "Select an account/session first.",
+                    "No Account Selected", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            long accountId = sessionAccountIds.get(comboIdx);
+            List<Long> tcIds = new ArrayList<>();
+            for (int r : rows) tcIds.add(tableModel.getRow(r).id());
+            if (onRunSelected != null) onRunSelected.accept(accountId, tcIds);
+        });
+
         bar.add(selLabel);
+        bar.add(new JLabel("Session:"));
+        bar.add(sessionCombo);
+        bar.add(runBtn);
         bar.add(addToWorkingSet);
         bar.putClientProperty("selLabel", selLabel);
         return bar;
+    }
+
+    private void refreshSessionCombo() {
+        if (accountRepo == null || sessionCombo == null) return;
+        loader.submit(() -> {
+            try {
+                List<AccountRecord> accounts = accountRepo.getAll();
+                SwingUtilities.invokeLater(() -> {
+                    sessionCombo.removeAllItems();
+                    sessionAccountIds.clear();
+                    for (AccountRecord a : accounts) {
+                        sessionCombo.addItem(a.name());
+                        sessionAccountIds.add(a.id());
+                    }
+                });
+            } catch (Exception e) {
+                api.logging().logToError("[BAC] Load accounts for session picker failed: " + e.getMessage());
+            }
+        });
     }
 
     private void wireTableSelection() {

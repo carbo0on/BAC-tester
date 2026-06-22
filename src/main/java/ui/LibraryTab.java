@@ -161,8 +161,11 @@ public class LibraryTab extends JPanel {
         bottomBar.add(actionBar, BorderLayout.CENTER);
         tableArea.add(bottomBar, BorderLayout.SOUTH);
 
+        tableArea.setMinimumSize(new Dimension(0, 180));
+        viewerPanel.setMinimumSize(new Dimension(0, 160));
+
         JSplitPane vertSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableArea, viewerPanel);
-        vertSplit.setDividerLocation(340);
+        vertSplit.setDividerLocation(0.55);   // proportion — applied when component gets real size
         vertSplit.setResizeWeight(0.55);
         vertSplit.setDividerSize(5);
         vertSplit.setContinuousLayout(true);

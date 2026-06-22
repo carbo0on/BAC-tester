@@ -3,6 +3,10 @@ package ui;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.ui.editor.EditorOptions;
+import burp.api.montoya.ui.editor.HttpRequestEditor;
+import burp.api.montoya.ui.editor.HttpResponseEditor;
 import capture.CaptureService;
 import db.AccountRepository;
 import db.AccountRepository.AccountRecord;
@@ -13,8 +17,11 @@ import db.TestCaseRepository;
 import db.TestCaseRepository.TestCaseRow;
 
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.tree.*;
 import java.awt.*;
+import java.awt.datatransfer.*;
 import java.awt.event.*;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -24,15 +31,23 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
- * Library tab: left = folder tree, right = test cases table with danger-colored methods.
- * Supports: New Folder, Rename (F2/double-click), Move (right-click), Delete, multi-select.
+ * Library tab — Site-map style layout.
+ *
+ * Left: folder tree with drag-and-drop (folders + test cases).
+ * Right-top: test-case table with advanced filter bar.
+ * Right-bottom: Burp-native request / response viewer (auto-populates on row selection).
  */
 public class LibraryTab extends JPanel {
 
     private static final DateTimeFormatter DATE_FMT =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
+
+    private static final DataFlavor TC_FLAVOR =
+        new DataFlavor(long[].class, "BAC test case IDs");
 
     private final MontoyaApi api;
     private final FolderRepository folderRepo;
@@ -41,18 +56,21 @@ public class LibraryTab extends JPanel {
     private final DatabaseManager db;
     private AccountRepository accountRepo;
 
-    // Coloring mode: AUTO (by method) / MANUAL (by user tag) / OFF
-    private volatile String coloringMode = "AUTO";
+    private volatile String coloringMode   = "AUTO";
     private volatile boolean autoExpandFolders = true;
 
-    // Search/filter
-    private JTextField searchField;
+    // Filter state
+    private JTextField   searchField;
+    private JCheckBox    regexCheck;
+    private JComboBox<String> methodFilter;
+    private JTextField   statusFilter;
+    private JCheckBox    searchInReqCheck;
+    private JCheckBox    searchInRespCheck;
     private List<TestCaseRow> allRows = new ArrayList<>();
 
-    // Manual color tag palette (muted, theme-friendly)
     static final String[] COLOR_TAGS = {"RED", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE"};
 
-    // UI components
+    // UI
     private final JTree folderTree;
     private final DefaultTreeModel treeModel;
     private final DefaultMutableTreeNode treeRoot;
@@ -63,21 +81,23 @@ public class LibraryTab extends JPanel {
     private JComboBox<String> sessionCombo;
     private final List<Long> sessionAccountIds = new ArrayList<>();
 
-    // Background loader
+    // Burp native editors (non-null after construction)
+    private HttpRequestEditor  reqViewer;
+    private HttpResponseEditor respViewer;
+    private JPanel viewerPanel;
+
     private final ExecutorService loader = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "bac-library-loader");
         t.setDaemon(true);
         return t;
     });
 
-    // Currently selected folder (null = Inbox, "ALL" sentinel = show all)
-    private Long selectedFolderIdState = null; // null = Inbox
+    private Long selectedFolderIdState = null;
     private boolean showAll = false;
 
-    // Callbacks wired by MainTab
-    private Consumer<List<Long>> onAddToWorkingSet;
-    private Consumer<Long>       onOpenInCompare;
-    private BiConsumer<Long, List<Long>> onRunSelected; // (accountId, tcIds)
+    private Consumer<List<Long>>     onAddToWorkingSet;
+    private Consumer<Long>           onOpenInCompare;
+    private BiConsumer<Long, List<Long>> onRunSelected;
 
     public void setOnAddToWorkingSet(Consumer<List<Long>> cb) { this.onAddToWorkingSet = cb; }
     public void setOnOpenInCompare(Consumer<Long> cb)         { this.onOpenInCompare = cb; }
@@ -98,7 +118,11 @@ public class LibraryTab extends JPanel {
         this.captureService = captureService;
         this.db = db;
 
-        // --- Folder tree ---
+        // Burp native editors
+        reqViewer  = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
+        respViewer = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+
+        // Folder tree
         treeRoot = new DefaultMutableTreeNode("Library");
         treeModel = new DefaultTreeModel(treeRoot);
         folderTree = new JTree(treeModel);
@@ -106,46 +130,57 @@ public class LibraryTab extends JPanel {
         folderTree.setShowsRootHandles(true);
         folderTree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
         folderTree.setCellRenderer(new FolderTreeRenderer());
+        setupTreeDragDrop();
 
-        // --- Test cases table ---
+        // Table
         tableModel = new TestCaseTableModel();
         table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        table.setRowHeight(24);
+        table.setRowHeight(22);
         table.setShowGrid(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setFillsViewportHeight(true);
         table.setDefaultRenderer(Object.class, new MethodAwareRenderer());
         setupTableColumns();
+        setupTableDragSource();
 
-        // --- Status label ---
         statusLabel = new JLabel(" ");
         statusLabel.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
 
-        // --- Action bar (shows on multi-select) ---
         actionBar = buildActionBar();
 
-        // --- Layout ---
-        JScrollPane treeScroll = new JScrollPane(folderTree);
-        treeScroll.setMinimumSize(new Dimension(180, 0));
-        treeScroll.setPreferredSize(new Dimension(200, 0));
+        // Viewer panel (req left / resp right)
+        viewerPanel = buildViewerPanel();
 
-        JPanel rightPanel = new JPanel(new BorderLayout());
-        rightPanel.add(new JScrollPane(table), BorderLayout.CENTER);
-        rightPanel.add(buildRightToolbar(), BorderLayout.NORTH);
-
+        // Layout: right side = vertical split (table + filter) / viewer
+        JPanel tableArea = new JPanel(new BorderLayout(0, 0));
+        tableArea.add(buildFilterToolbar(), BorderLayout.NORTH);
+        tableArea.add(new JScrollPane(table), BorderLayout.CENTER);
         JPanel bottomBar = new JPanel(new BorderLayout());
         bottomBar.add(statusLabel, BorderLayout.WEST);
         bottomBar.add(actionBar, BorderLayout.CENTER);
-        rightPanel.add(bottomBar, BorderLayout.SOUTH);
+        tableArea.add(bottomBar, BorderLayout.SOUTH);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, treeScroll, rightPanel);
-        split.setDividerLocation(200);
-        split.setDividerSize(4);
+        tableArea.setMinimumSize(new Dimension(0, 180));
+        viewerPanel.setMinimumSize(new Dimension(0, 160));
 
-        add(split, BorderLayout.CENTER);
+        JSplitPane vertSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableArea, viewerPanel);
+        vertSplit.setDividerLocation(0.55);   // proportion — applied when component gets real size
+        vertSplit.setResizeWeight(0.55);
+        vertSplit.setDividerSize(5);
+        vertSplit.setContinuousLayout(true);
 
-        // --- Wiring ---
+        JScrollPane treeScroll = new JScrollPane(folderTree);
+        treeScroll.setMinimumSize(new Dimension(170, 0));
+        treeScroll.setPreferredSize(new Dimension(190, 0));
+
+        JSplitPane hSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, treeScroll, vertSplit);
+        hSplit.setDividerLocation(190);
+        hSplit.setDividerSize(4);
+        hSplit.setContinuousLayout(true);
+
+        add(hSplit, BorderLayout.CENTER);
+
         wireFolderTreeSelection();
         wireFolderTreeContextMenu();
         wireTableContextMenu();
@@ -153,19 +188,15 @@ public class LibraryTab extends JPanel {
         wireKeyBindings();
         wireInlineRename();
 
-        // Register with capture service to refresh on new saves
         captureService.addOnSaveListener(this::refresh);
-
-        // Load initial state
         refresh();
     }
 
-    // ---- Public --------------------------------------------------------
+    // ---- Public -----------------------------------------------------------
 
-    /** Reload folder tree + test case table from DB. */
     public void refresh() {
         refreshSessionCombo();
-        loadColoringMode();
+        loadDisplaySettings();
         loader.submit(() -> {
             try {
                 List<FolderRecord> folders = folderRepo.getAllFolders();
@@ -182,8 +213,7 @@ public class LibraryTab extends JPanel {
         });
     }
 
-    /** Reload display-related settings from the DB (cheap, runs off-EDT). */
-    private void loadColoringMode() {
+    private void loadDisplaySettings() {
         loader.submit(() -> {
             try {
                 String mode = db.getSetting("coloring_mode");
@@ -195,74 +225,248 @@ public class LibraryTab extends JPanel {
         });
     }
 
-    /** Public hook so the Settings tab can push a live coloring-mode change. */
     public void setColoringMode(String mode) {
-        if (mode != null) {
-            this.coloringMode = mode;
-            SwingUtilities.invokeLater(table::repaint);
-        }
+        if (mode != null) { this.coloringMode = mode; SwingUtilities.invokeLater(table::repaint); }
     }
 
-    /** Filter the in-memory rows by the search box text and push to the model. */
+    // ---- Filter -----------------------------------------------------------
+
     private void applyFilter() {
-        String q = searchField != null ? searchField.getText().trim().toLowerCase() : "";
-        List<TestCaseRow> shown;
-        if (q.isEmpty()) {
-            shown = allRows;
-        } else {
-            shown = new ArrayList<>();
-            for (TestCaseRow r : allRows) {
-                if (matchesQuery(r, q)) shown.add(r);
+        String q     = searchField != null ? searchField.getText().trim() : "";
+        boolean regex = regexCheck != null && regexCheck.isSelected();
+        String mf    = methodFilter != null ? (String) methodFilter.getSelectedItem() : "All";
+        String sf    = statusFilter != null ? statusFilter.getText().trim() : "";
+
+        Pattern pattern = null;
+        if (regex && !q.isBlank()) {
+            try { pattern = Pattern.compile(q, Pattern.CASE_INSENSITIVE); }
+            catch (PatternSyntaxException ignored) { pattern = null; }
+        }
+
+        final Pattern finalPattern = pattern;
+        final String finalQ = q;
+
+        List<TestCaseRow> shown = new ArrayList<>();
+        for (TestCaseRow r : allRows) {
+            if (!"All".equals(mf) && !mf.equalsIgnoreCase(r.method())) continue;
+            if (!sf.isBlank() && !matchesStatus(r, sf)) continue;
+            if (!finalQ.isBlank()) {
+                if (regex) {
+                    if (finalPattern == null) continue;
+                    if (!regexMatch(finalPattern, r)) continue;
+                } else {
+                    if (!containsQuery(r, finalQ.toLowerCase())) continue;
+                }
             }
+            shown.add(r);
         }
         tableModel.setRows(shown);
         updateStatus(shown.size());
     }
 
-    private static boolean matchesQuery(TestCaseRow r, String q) {
-        return contains(r.name(), q)
-            || contains(r.url(), q)
-            || contains(r.host(), q)
-            || contains(r.method(), q)
-            || contains(r.notes(), q);
+    private static boolean matchesStatus(TestCaseRow r, String sf) {
+        Integer st = r.primaryBaselineStatus();
+        if (st == null) return false;
+        if (sf.endsWith("xx")) {
+            try {
+                int prefix = Integer.parseInt(sf.substring(0, sf.length() - 2));
+                return st / 100 == prefix;
+            } catch (NumberFormatException e) { return false; }
+        }
+        try { return Integer.parseInt(sf) == st; } catch (NumberFormatException e) { return false; }
     }
 
-    private static boolean contains(String s, String q) {
-        return s != null && s.toLowerCase().contains(q);
+    private static boolean containsQuery(TestCaseRow r, String q) {
+        return ci(r.name(), q) || ci(r.url(), q) || ci(r.host(), q)
+            || ci(r.method(), q) || ci(r.notes(), q);
     }
 
-    // ---- Tree ----------------------------------------------------------
+    private static boolean regexMatch(Pattern p, TestCaseRow r) {
+        return test(p, r.name()) || test(p, r.url()) || test(p, r.host())
+            || test(p, r.method()) || test(p, r.notes());
+    }
+
+    private static boolean ci(String s, String q) { return s != null && s.toLowerCase().contains(q); }
+    private static boolean test(Pattern p, String s) { return s != null && p.matcher(s).find(); }
+
+    // ---- Toolbar ---------------------------------------------------------
+
+    private JPanel buildFilterToolbar() {
+        JPanel bar = new JPanel(new BorderLayout(0, 2));
+        bar.setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
+
+        // Row 1: folder button + text search
+        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        JButton newFolderBtn = new JButton("+ Folder");
+        newFolderBtn.setToolTipText("Create a new top-level folder");
+        newFolderBtn.addActionListener(e -> promptCreateFolder(null));
+        row1.add(newFolderBtn);
+
+        row1.add(new JLabel("  Search:"));
+        searchField = new JTextField(20);
+        searchField.setToolTipText("Filter by name, URL, host, method, or notes (supports regex)");
+        DocumentListener dl = new DocumentListener() {
+            public void insertUpdate(DocumentEvent e)  { applyFilter(); }
+            public void removeUpdate(DocumentEvent e)  { applyFilter(); }
+            public void changedUpdate(DocumentEvent e) { applyFilter(); }
+        };
+        searchField.getDocument().addDocumentListener(dl);
+        row1.add(searchField);
+
+        regexCheck = new JCheckBox("Regex");
+        regexCheck.setToolTipText("Treat search text as a regular expression");
+        regexCheck.addActionListener(e -> applyFilter());
+        row1.add(regexCheck);
+
+        JButton clearBtn = new JButton("✕");
+        clearBtn.setMargin(new Insets(1, 5, 1, 5));
+        clearBtn.setToolTipText("Clear search");
+        clearBtn.addActionListener(e -> { searchField.setText(""); applyFilter(); });
+        row1.add(clearBtn);
+
+        // Row 2: method + status filters
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        row2.add(new JLabel("Method:"));
+        methodFilter = new JComboBox<>(new String[]{"All","GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"});
+        methodFilter.setPreferredSize(new Dimension(90, 22));
+        methodFilter.addActionListener(e -> applyFilter());
+        row2.add(methodFilter);
+
+        row2.add(new JLabel("  Status:"));
+        statusFilter = new JTextField(7);
+        statusFilter.setToolTipText("Filter by baseline status (e.g. 200, 4xx, 403)");
+        statusFilter.getDocument().addDocumentListener(dl);
+        row2.add(statusFilter);
+
+        // In-request / in-response search (async, triggered by button)
+        searchInReqCheck  = new JCheckBox("in Request");
+        searchInRespCheck = new JCheckBox("in Response");
+        searchInReqCheck.setToolTipText("Also search inside raw request bytes (slower)");
+        searchInRespCheck.setToolTipText("Also search inside raw response bytes (slower)");
+        JButton deepSearch = new JButton("Deep Search");
+        deepSearch.setToolTipText("Search inside request/response bodies (slower)");
+        deepSearch.addActionListener(e -> runDeepSearch());
+        row2.add(searchInReqCheck);
+        row2.add(searchInRespCheck);
+        row2.add(deepSearch);
+
+        bar.add(row1, BorderLayout.NORTH);
+        bar.add(row2, BorderLayout.CENTER);
+
+        return bar;
+    }
+
+    private void runDeepSearch() {
+        String q = searchField.getText().trim();
+        if (q.isBlank()) { applyFilter(); return; }
+        boolean inReq  = searchInReqCheck.isSelected();
+        boolean inResp = searchInRespCheck.isSelected();
+        if (!inReq && !inResp) { applyFilter(); return; }
+
+        boolean regex = regexCheck.isSelected();
+        Pattern pat = null;
+        if (regex) {
+            try { pat = Pattern.compile(q, Pattern.CASE_INSENSITIVE); }
+            catch (PatternSyntaxException e) { return; }
+        }
+        final Pattern finalPat = pat;
+        final String  finalQ   = q.toLowerCase();
+
+        statusLabel.setText("  Searching…");
+        final List<TestCaseRow> candidates = new ArrayList<>(allRows);
+        loader.submit(() -> {
+            List<TestCaseRow> matches = new ArrayList<>();
+            for (TestCaseRow r : candidates) {
+                try {
+                    boolean hit = false;
+                    if (inReq) {
+                        byte[] raw = tcRepo.getRequestRaw(r.id());
+                        if (raw != null) hit = bodyContains(raw, finalQ, finalPat, regex);
+                    }
+                    if (!hit && inResp) {
+                        byte[] raw = tcRepo.getPrimaryBaselineResponse(r.id());
+                        if (raw != null) hit = bodyContains(raw, finalQ, finalPat, regex);
+                    }
+                    if (hit) matches.add(r);
+                } catch (Exception ignored) {}
+            }
+            SwingUtilities.invokeLater(() -> {
+                tableModel.setRows(matches);
+                updateStatus(matches.size());
+            });
+        });
+    }
+
+    private static boolean bodyContains(byte[] raw, String q, Pattern pat, boolean regex) {
+        String body = new String(raw);
+        if (regex && pat != null) return pat.matcher(body).find();
+        return body.toLowerCase().contains(q);
+    }
+
+    // ---- Viewer panel ----------------------------------------------------
+
+    private JPanel buildViewerPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JLabel header = new JLabel("  Request / Response  —  select a row above to preview");
+        header.setFont(header.getFont().deriveFont(Font.ITALIC, 11f));
+        header.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0,
+            UIManager.getColor("Separator.foreground")));
+        panel.add(header, BorderLayout.NORTH);
+
+        JSplitPane sp = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+            reqViewer.uiComponent(), respViewer.uiComponent());
+        sp.setDividerLocation(0.5);
+        sp.setResizeWeight(0.5);
+        sp.setContinuousLayout(true);
+        sp.setDividerSize(4);
+        panel.add(sp, BorderLayout.CENTER);
+
+        return panel;
+    }
+
+    private void populateViewer(TestCaseRow tc) {
+        loader.submit(() -> {
+            try {
+                byte[] reqBytes  = tcRepo.getRequestRaw(tc.id());
+                byte[] respBytes = tcRepo.getPrimaryBaselineResponse(tc.id());
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        if (reqBytes != null && reqBytes.length > 0) {
+                            reqViewer.setRequest(HttpRequest.httpRequest(ByteArray.byteArray(reqBytes)));
+                        }
+                        if (respBytes != null && respBytes.length > 0) {
+                            respViewer.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(respBytes)));
+                        }
+                    } catch (Exception ignored) {}
+                });
+            } catch (Exception e) {
+                api.logging().logToError("[BAC] Viewer load failed: " + e.getMessage());
+            }
+        });
+    }
+
+    // ---- Tree ------------------------------------------------------------
 
     private void rebuildTree(List<FolderRecord> folders, int inboxCount) {
         treeRoot.removeAllChildren();
-
-        DefaultMutableTreeNode inbox = new DefaultMutableTreeNode(
-            new FolderNode(null, "Inbox (" + inboxCount + ")"));
+        DefaultMutableTreeNode inbox =
+            new DefaultMutableTreeNode(new FolderNode(null, "Inbox (" + inboxCount + ")"));
         treeRoot.add(inbox);
 
-        // Build hierarchy
         Map<Long, DefaultMutableTreeNode> nodeMap = new HashMap<>();
-        for (FolderRecord fr : folders) {
+        for (FolderRecord fr : folders)
             nodeMap.put(fr.id(), new DefaultMutableTreeNode(new FolderNode(fr.id(), fr.name())));
-        }
         for (FolderRecord fr : folders) {
             DefaultMutableTreeNode node = nodeMap.get(fr.id());
-            if (fr.parentId() == null) {
-                treeRoot.add(node);
-            } else {
+            if (fr.parentId() == null) treeRoot.add(node);
+            else {
                 DefaultMutableTreeNode parent = nodeMap.get(fr.parentId());
-                if (parent != null) parent.add(node);
-                else treeRoot.add(node);
+                if (parent != null) parent.add(node); else treeRoot.add(node);
             }
         }
-
         treeModel.reload();
-        // Re-expand all (when enabled)
-        if (autoExpandFolders) {
+        if (autoExpandFolders)
             for (int i = 0; i < folderTree.getRowCount(); i++) folderTree.expandRow(i);
-        }
-
-        // Re-select the current path
         selectFolderNode(selectedFolderIdState);
     }
 
@@ -277,7 +481,6 @@ public class LibraryTab extends JPanel {
                 return;
             }
         }
-        // Default: select Inbox
         if (folderTree.getRowCount() > 0) folderTree.setSelectionRow(0);
     }
 
@@ -297,45 +500,37 @@ public class LibraryTab extends JPanel {
 
     private void wireFolderTreeContextMenu() {
         JPopupMenu popup = new JPopupMenu();
-
-        JMenuItem newFolder   = new JMenuItem("New Folder");
+        JMenuItem newFolder    = new JMenuItem("New Folder");
+        JMenuItem newSub       = new JMenuItem("New Sub-folder");
         JMenuItem renameFolder = new JMenuItem("Rename Folder");
         JMenuItem deleteFolder = new JMenuItem("Delete Folder");
 
         popup.add(newFolder);
+        popup.add(newSub);
         popup.add(renameFolder);
         popup.add(deleteFolder);
 
         folderTree.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
-
             private void maybeShow(MouseEvent e) {
                 if (!e.isPopupTrigger()) return;
                 TreePath path = folderTree.getPathForLocation(e.getX(), e.getY());
                 folderTree.setSelectionPath(path);
                 FolderNode fn = selectedFolderNode();
-                boolean isInbox = fn != null && fn.id() == null;
+                boolean isInbox = fn == null || fn.id() == null;
                 renameFolder.setEnabled(!isInbox);
                 deleteFolder.setEnabled(!isInbox);
+                newSub.setEnabled(!isInbox);
                 popup.show(folderTree, e.getX(), e.getY());
             }
         });
 
-        newFolder.addActionListener(e -> {
-            FolderNode parent = selectedFolderNode();
-            Long parentId = parent != null ? parent.id() : null;
-            String name = JOptionPane.showInputDialog(this, "Folder name:", "New Folder", JOptionPane.PLAIN_MESSAGE);
-            if (name != null && !name.isBlank()) {
-                loader.submit(() -> {
-                    try {
-                        folderRepo.createFolder(name.trim(), parentId);
-                        SwingUtilities.invokeLater(this::refresh);
-                    } catch (Exception ex) {
-                        api.logging().logToError("[BAC] Create folder failed: " + ex.getMessage());
-                    }
-                });
-            }
+        newFolder.addActionListener(e -> promptCreateFolder(null));
+        newSub.addActionListener(e -> {
+            FolderNode fn = selectedFolderNode();
+            Long parentId = fn != null ? fn.id() : null;
+            promptCreateFolder(parentId);
         });
 
         renameFolder.addActionListener(e -> {
@@ -346,12 +541,8 @@ public class LibraryTab extends JPanel {
             if (newName != null && !newName.isBlank()) {
                 long id = fn.id();
                 loader.submit(() -> {
-                    try {
-                        folderRepo.renameFolder(id, newName.trim());
-                        SwingUtilities.invokeLater(this::refresh);
-                    } catch (Exception ex) {
-                        api.logging().logToError("[BAC] Rename folder failed: " + ex.getMessage());
-                    }
+                    try { folderRepo.renameFolder(id, newName.trim()); SwingUtilities.invokeLater(this::refresh); }
+                    catch (Exception ex) { api.logging().logToError("[BAC] Rename folder: " + ex.getMessage()); }
                 });
             }
         });
@@ -360,26 +551,28 @@ public class LibraryTab extends JPanel {
             FolderNode fn = selectedFolderNode();
             if (fn == null || fn.id() == null) return;
             int confirm = JOptionPane.showConfirmDialog(this,
-                "Delete folder \"" + fn.displayName() + "\"?\nTest cases inside will be moved to Inbox.",
+                "Delete folder \"" + fn.displayName() + "\"?\nTest cases inside will move to Inbox.",
                 "Delete Folder", JOptionPane.YES_NO_OPTION);
             if (confirm != JOptionPane.YES_OPTION) return;
             long id = fn.id();
             loader.submit(() -> {
                 try {
-                    // Move test cases to Inbox first
-                    for (TestCaseRow row : tcRepo.getByFolder(id)) {
-                        tcRepo.moveToFolder(row.id(), null);
-                    }
+                    for (TestCaseRow row : tcRepo.getByFolder(id)) tcRepo.moveToFolder(row.id(), null);
                     folderRepo.deleteFolder(id);
-                    SwingUtilities.invokeLater(() -> {
-                        selectedFolderIdState = null;
-                        refresh();
-                    });
-                } catch (Exception ex) {
-                    api.logging().logToError("[BAC] Delete folder failed: " + ex.getMessage());
-                }
+                    SwingUtilities.invokeLater(() -> { selectedFolderIdState = null; refresh(); });
+                } catch (Exception ex) { api.logging().logToError("[BAC] Delete folder: " + ex.getMessage()); }
             });
         });
+    }
+
+    private void promptCreateFolder(Long parentId) {
+        String name = JOptionPane.showInputDialog(this, "Folder name:", "New Folder", JOptionPane.PLAIN_MESSAGE);
+        if (name != null && !name.isBlank()) {
+            loader.submit(() -> {
+                try { folderRepo.createFolder(name.trim(), parentId); SwingUtilities.invokeLater(this::refresh); }
+                catch (Exception ex) { api.logging().logToError("[BAC] Create folder: " + ex.getMessage()); }
+            });
+        }
     }
 
     private FolderNode selectedFolderNode() {
@@ -387,74 +580,133 @@ public class LibraryTab extends JPanel {
         if (path == null) return null;
         Object last = path.getLastPathComponent();
         if (last instanceof DefaultMutableTreeNode node &&
-            node.getUserObject() instanceof FolderNode fn) {
-            return fn;
-        }
+            node.getUserObject() instanceof FolderNode fn) return fn;
         return null;
     }
 
-    // ---- Table ---------------------------------------------------------
+    // ---- Tree drag-and-drop (folder rearrangement) -----------------------
+
+    private void setupTreeDragDrop() {
+        folderTree.setDragEnabled(true);
+        folderTree.setDropMode(DropMode.ON);
+        folderTree.setTransferHandler(new FolderTreeTransferHandler());
+    }
+
+    private class FolderTreeTransferHandler extends TransferHandler {
+
+        private FolderNode draggedFolder;
+
+        @Override
+        protected Transferable createTransferable(JComponent c) {
+            FolderNode fn = selectedFolderNode();
+            if (fn == null || fn.id() == null) return null;
+            draggedFolder = fn;
+            return new Transferable() {
+                @Override public DataFlavor[] getTransferDataFlavors() { return new DataFlavor[]{DataFlavor.stringFlavor}; }
+                @Override public boolean isDataFlavorSupported(DataFlavor f) { return f == DataFlavor.stringFlavor; }
+                @Override public Object getTransferData(DataFlavor f) { return "folder:" + fn.id(); }
+            };
+        }
+
+        @Override public int getSourceActions(JComponent c) { return MOVE; }
+
+        @Override
+        public boolean canImport(TransferSupport support) {
+            if (!support.isDrop()) return false;
+            // Accept: folder-to-folder or test-cases from table
+            return support.isDataFlavorSupported(DataFlavor.stringFlavor)
+                || support.isDataFlavorSupported(TC_FLAVOR);
+        }
+
+        @Override
+        public boolean importData(TransferSupport support) {
+            if (!support.isDrop()) return false;
+            JTree.DropLocation dl = (JTree.DropLocation) support.getDropLocation();
+            TreePath targetPath = dl.getPath();
+            if (targetPath == null) return false;
+            Object last = targetPath.getLastPathComponent();
+            if (!(last instanceof DefaultMutableTreeNode targetNode)) return false;
+            if (!(targetNode.getUserObject() instanceof FolderNode targetFn)) return false;
+
+            try {
+                // Test-case transfer from table
+                if (support.isDataFlavorSupported(TC_FLAVOR)) {
+                    long[] ids = (long[]) support.getTransferable().getTransferData(TC_FLAVOR);
+                    final Long folderId = targetFn.id();
+                    loader.submit(() -> {
+                        try {
+                            for (long id : ids) tcRepo.moveToFolder(id, folderId);
+                            SwingUtilities.invokeLater(LibraryTab.this::refresh);
+                        } catch (Exception ex) { api.logging().logToError("[BAC] DnD move TC: " + ex.getMessage()); }
+                    });
+                    return true;
+                }
+                // Folder-to-folder
+                if (draggedFolder != null && draggedFolder.id() != null) {
+                    long srcId = draggedFolder.id();
+                    Long dstId = targetFn.id(); // null = Inbox root
+                    // Prevent dropping onto itself or creating a cycle
+                    if (Objects.equals(srcId, dstId)) return false;
+                    loader.submit(() -> {
+                        try {
+                            folderRepo.updateParent(srcId, dstId, 0);
+                            SwingUtilities.invokeLater(LibraryTab.this::refresh);
+                        } catch (Exception ex) { api.logging().logToError("[BAC] DnD move folder: " + ex.getMessage()); }
+                    });
+                    draggedFolder = null;
+                    return true;
+                }
+            } catch (Exception e) {
+                api.logging().logToError("[BAC] DnD import failed: " + e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    // ---- Table drag source -----------------------------------------------
+
+    private void setupTableDragSource() {
+        table.setDragEnabled(true);
+        table.setTransferHandler(new TransferHandler() {
+            @Override
+            protected Transferable createTransferable(JComponent c) {
+                int[] rows = table.getSelectedRows();
+                if (rows.length == 0) return null;
+                long[] ids = new long[rows.length];
+                for (int i = 0; i < rows.length; i++) ids[i] = tableModel.getRow(rows[i]).id();
+                return new Transferable() {
+                    @Override public DataFlavor[] getTransferDataFlavors() { return new DataFlavor[]{TC_FLAVOR}; }
+                    @Override public boolean isDataFlavorSupported(DataFlavor f) { return TC_FLAVOR.equals(f); }
+                    @Override public Object getTransferData(DataFlavor f) { return ids; }
+                };
+            }
+            @Override public int getSourceActions(JComponent c) { return MOVE; }
+        });
+    }
+
+    // ---- Table -----------------------------------------------------------
 
     private void setupTableColumns() {
         var cm = table.getColumnModel();
-        cm.getColumn(0).setPreferredWidth(30);  cm.getColumn(0).setMaxWidth(36);  // danger
-        cm.getColumn(1).setPreferredWidth(70);  cm.getColumn(1).setMaxWidth(90);  // method
-        cm.getColumn(2).setPreferredWidth(170);                                    // name
-        cm.getColumn(3).setPreferredWidth(120);                                    // host
-        cm.getColumn(4).setPreferredWidth(190);                                    // path
-        cm.getColumn(5).setPreferredWidth(70);  cm.getColumn(5).setMaxWidth(100); // status
-        cm.getColumn(6).setPreferredWidth(70);  cm.getColumn(6).setMaxWidth(90);  // size
-        cm.getColumn(7).setPreferredWidth(160);                                    // notes
-        cm.getColumn(8).setPreferredWidth(130); cm.getColumn(8).setMaxWidth(150); // captured
-    }
-
-    private JPanel buildRightToolbar() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
-        JButton newFolderBtn = new JButton("+ Folder");
-        newFolderBtn.setToolTipText("Create a new top-level folder");
-        newFolderBtn.addActionListener(e -> {
-            String name = JOptionPane.showInputDialog(this, "Folder name:", "New Folder", JOptionPane.PLAIN_MESSAGE);
-            if (name != null && !name.isBlank()) {
-                loader.submit(() -> {
-                    try {
-                        folderRepo.createFolder(name.trim(), null);
-                        SwingUtilities.invokeLater(this::refresh);
-                    } catch (Exception ex) {
-                        api.logging().logToError("[BAC] Create folder failed: " + ex.getMessage());
-                    }
-                });
-            }
-        });
-        bar.add(newFolderBtn);
-
-        // --- Search / filter box ---
-        bar.add(new JLabel("   🔎 Search:"));
-        searchField = new JTextField(22);
-        searchField.setToolTipText("Filter by name, URL, host, method, or notes");
-        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            @Override public void insertUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent e)  { applyFilter(); }
-            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { applyFilter(); }
-        });
-        bar.add(searchField);
-
-        JButton clearBtn = new JButton("✕");
-        clearBtn.setMargin(new Insets(1, 6, 1, 6));
-        clearBtn.setToolTipText("Clear search");
-        clearBtn.addActionListener(e -> { searchField.setText(""); applyFilter(); });
-        bar.add(clearBtn);
-
-        return bar;
+        cm.getColumn(0).setPreferredWidth(28);  cm.getColumn(0).setMaxWidth(34);   // danger icon
+        cm.getColumn(1).setPreferredWidth(70);  cm.getColumn(1).setMaxWidth(90);   // method
+        cm.getColumn(2).setPreferredWidth(160);                                     // name
+        cm.getColumn(3).setPreferredWidth(120);                                     // host
+        cm.getColumn(4).setPreferredWidth(190);                                     // path
+        cm.getColumn(5).setPreferredWidth(60);  cm.getColumn(5).setMaxWidth(90);   // status
+        cm.getColumn(6).setPreferredWidth(65);  cm.getColumn(6).setMaxWidth(85);   // size
+        cm.getColumn(7).setPreferredWidth(140);                                     // notes
+        cm.getColumn(8).setPreferredWidth(125); cm.getColumn(8).setMaxWidth(145);  // captured
     }
 
     private JPanel buildActionBar() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
-        bar.setVisible(false); // hidden until rows are selected
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 3));
+        bar.setVisible(false);
 
         JLabel selLabel = new JLabel("0 selected");
 
         JButton addToWorkingSet = new JButton("Add to Working Set");
-        addToWorkingSet.setToolTipText("Add selected test cases to Compare tab working set");
+        addToWorkingSet.setToolTipText("Open selected in Compare tab working set");
         addToWorkingSet.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
             if (rows.length == 0 || onAddToWorkingSet == null) return;
@@ -464,11 +716,10 @@ public class LibraryTab extends JPanel {
         });
 
         sessionCombo = new JComboBox<>();
-        sessionCombo.setToolTipText("Select account/session to run against");
-        sessionCombo.setPreferredSize(new Dimension(160, sessionCombo.getPreferredSize().height));
+        sessionCombo.setToolTipText("Account/session to run against");
+        sessionCombo.setPreferredSize(new Dimension(155, sessionCombo.getPreferredSize().height));
 
         JButton runBtn = new JButton("Run on selected ▶");
-        runBtn.setToolTipText("Run the chosen session against all selected test cases");
         runBtn.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
             if (rows.length == 0) return;
@@ -506,9 +757,7 @@ public class LibraryTab extends JPanel {
                         sessionAccountIds.add(a.id());
                     }
                 });
-            } catch (Exception e) {
-                api.logging().logToError("[BAC] Load accounts for session picker failed: " + e.getMessage());
-            }
+            } catch (Exception e) { api.logging().logToError("[BAC] Load accounts: " + e.getMessage()); }
         });
     }
 
@@ -519,20 +768,27 @@ public class LibraryTab extends JPanel {
             JLabel lbl = (JLabel) actionBar.getClientProperty("selLabel");
             if (lbl != null) lbl.setText(count + " selected");
             actionBar.setVisible(count > 0);
+
+            // Auto-populate viewer on single selection
+            if (count == 1) {
+                int row = table.getSelectedRow();
+                if (row >= 0 && row < tableModel.getRowCount()) {
+                    populateViewer(tableModel.getRow(row));
+                }
+            }
         });
     }
 
     private void wireTableContextMenu() {
         JPopupMenu popup = new JPopupMenu();
-        JMenuItem renameItem    = new JMenuItem("Rename");
-        JMenuItem notesItem     = new JMenuItem("Edit Notes / Comment…");
-        JMenuItem moveItem      = new JMenuItem("Move to Folder…");
-        JMenuItem deleteItem    = new JMenuItem("Delete");
-        JMenuItem viewItem      = new JMenuItem("View Request / Response");
-        JMenuItem compareItem   = new JMenuItem("Open in Compare");
+        JMenuItem renameItem     = new JMenuItem("Rename");
+        JMenuItem notesItem      = new JMenuItem("Edit Notes / Comment…");
+        JMenuItem moveItem       = new JMenuItem("Move to Folder…");
+        JMenuItem deleteItem     = new JMenuItem("Delete");
+        JMenuItem viewItem       = new JMenuItem("View Request / Response");
+        JMenuItem compareItem    = new JMenuItem("Open in Compare");
         JMenuItem rebaselineItem = new JMenuItem("Re-baseline (resend as owner)");
 
-        // Manual color submenu
         JMenu colorMenu = new JMenu("Set Color");
         for (String tag : COLOR_TAGS) {
             JMenuItem ci = new JMenuItem(tag.charAt(0) + tag.substring(1).toLowerCase());
@@ -544,13 +800,9 @@ public class LibraryTab extends JPanel {
         clearColor.addActionListener(e -> applyColorTag(null));
         colorMenu.add(clearColor);
 
-        popup.add(renameItem);
-        popup.add(notesItem);
-        popup.add(colorMenu);
-        popup.add(moveItem);
+        popup.add(renameItem); popup.add(notesItem); popup.add(colorMenu); popup.add(moveItem);
         popup.addSeparator();
-        popup.add(viewItem);
-        popup.add(compareItem);
+        popup.add(viewItem); popup.add(compareItem);
         popup.addSeparator();
         popup.add(rebaselineItem);
         popup.addSeparator();
@@ -559,7 +811,6 @@ public class LibraryTab extends JPanel {
         table.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
             @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
-
             private void maybeShow(MouseEvent e) {
                 if (!e.isPopupTrigger()) return;
                 int row = table.rowAtPoint(e.getPoint());
@@ -571,19 +822,7 @@ public class LibraryTab extends JPanel {
         renameItem.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) return;
-            TestCaseRow tc = tableModel.getRow(row);
-            String newName = (String) JOptionPane.showInputDialog(this, "New name:",
-                "Rename", JOptionPane.PLAIN_MESSAGE, null, null, tc.name());
-            if (newName != null && !newName.isBlank()) {
-                loader.submit(() -> {
-                    try {
-                        tcRepo.rename(tc.id(), newName.trim());
-                        SwingUtilities.invokeLater(this::reloadTable);
-                    } catch (Exception ex) {
-                        api.logging().logToError("[BAC] Rename failed: " + ex.getMessage());
-                    }
-                });
-            }
+            triggerRename(row);
         });
 
         notesItem.addActionListener(e -> {
@@ -593,8 +832,7 @@ public class LibraryTab extends JPanel {
 
         moveItem.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
-            if (rows.length == 0) return;
-            showMoveFolderDialog(rows);
+            if (rows.length > 0) showMoveFolderDialog(rows);
         });
 
         deleteItem.addActionListener(e -> {
@@ -606,19 +844,14 @@ public class LibraryTab extends JPanel {
             if (confirm != JOptionPane.YES_OPTION) return;
             long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
             loader.submit(() -> {
-                try {
-                    for (long id : ids) tcRepo.delete(id);
-                    SwingUtilities.invokeLater(this::refresh);
-                } catch (Exception ex) {
-                    api.logging().logToError("[BAC] Delete failed: " + ex.getMessage());
-                }
+                try { for (long id : ids) tcRepo.delete(id); SwingUtilities.invokeLater(this::refresh); }
+                catch (Exception ex) { api.logging().logToError("[BAC] Delete: " + ex.getMessage()); }
             });
         });
 
         viewItem.addActionListener(e -> {
             int row = table.getSelectedRow();
-            if (row < 0) return;
-            showRequestResponseViewer(tableModel.getRow(row));
+            if (row >= 0) populateViewer(tableModel.getRow(row));
         });
 
         compareItem.addActionListener(e -> {
@@ -631,8 +864,7 @@ public class LibraryTab extends JPanel {
             int[] rows = table.getSelectedRows();
             if (rows.length == 0) return;
             int confirm = JOptionPane.showConfirmDialog(this,
-                "Re-send " + rows.length + " request(s) using the owner account and save a new baseline version?\n" +
-                "Existing baselines will NOT be deleted.",
+                "Re-send " + rows.length + " request(s) as owner and save a new baseline?\nExisting baselines will NOT be deleted.",
                 "Re-baseline", JOptionPane.YES_NO_OPTION);
             if (confirm != JOptionPane.YES_OPTION) return;
             long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
@@ -642,43 +874,36 @@ public class LibraryTab extends JPanel {
 
     private void rebaselineAsync(long[] tcIds) {
         loader.submit(() -> {
-            int done = 0;
-            int errors = 0;
+            int done = 0, errors = 0;
             for (long tcId : tcIds) {
                 try {
                     TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
-                    if (tc == null || tc.ownerAccountId() == null) { errors++; continue; }
-                    if (accountRepo == null) { errors++; continue; }
+                    if (tc == null || tc.ownerAccountId() == null || accountRepo == null) { errors++; continue; }
                     AccountRecord owner = accountRepo.getById(tc.ownerAccountId()).orElse(null);
                     if (owner == null) { errors++; continue; }
-
                     byte[] reqRaw = tcRepo.getRequestRaw(tcId);
                     if (reqRaw == null) { errors++; continue; }
-
-                    // Swap identity to owner
                     HttpRequest req = buildOwnerRequest(reqRaw, owner);
                     if (req == null) { errors++; continue; }
-
                     var resp = api.http().sendRequest(req);
                     byte[] respRaw = resp.response().toByteArray().getBytes();
                     int status = resp.response().statusCode();
                     int length = resp.response().body().length();
                     String today = java.time.LocalDate.now().toString();
-
-                    long newBlId = tcRepo.addBaseline(tcId, owner.id(),
-                        "rebaseline " + today, status, length, respRaw);
+                    long newBlId = tcRepo.addBaseline(tcId, owner.id(), "rebaseline " + today, status, length, respRaw);
                     tcRepo.setPrimaryBaseline(tcId, newBlId);
                     done++;
                 } catch (Exception ex) {
-                    api.logging().logToError("[BAC] Re-baseline error for TC " + tcId + ": " + ex.getMessage());
+                    api.logging().logToError("[BAC] Re-baseline TC " + tcId + ": " + ex.getMessage());
                     errors++;
                 }
             }
             final int d = done, er = errors;
             SwingUtilities.invokeLater(() -> {
                 refresh();
-                String msg = "Re-baseline complete: " + d + " succeeded" + (er > 0 ? ", " + er + " failed." : ".");
-                JOptionPane.showMessageDialog(this, msg, "Re-baseline", JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.showMessageDialog(this,
+                    "Re-baseline complete: " + d + " succeeded" + (er > 0 ? ", " + er + " failed." : "."),
+                    "Re-baseline", JOptionPane.INFORMATION_MESSAGE);
             });
         });
     }
@@ -686,12 +911,8 @@ public class LibraryTab extends JPanel {
     private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner) {
         try {
             HttpRequest req = HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
-            req = req.withRemovedHeader("Cookie");
-            req = req.withRemovedHeader("Authorization");
-            req = req.withRemovedHeader("X-Auth-Token");
-            req = req.withRemovedHeader("X-Session-Token");
-            req = req.withRemovedHeader("X-Access-Token");
-            req = req.withRemovedHeader("X-Api-Key");
+            for (String h : new String[]{"Cookie","Authorization","X-Auth-Token","X-Session-Token","X-Access-Token","X-Api-Key"})
+                req = req.withRemovedHeader(h);
             Map<String, String> cookies = owner.cookies();
             if (!cookies.isEmpty()) {
                 StringBuilder sb = new StringBuilder();
@@ -701,12 +922,10 @@ public class LibraryTab extends JPanel {
                 }
                 req = req.withAddedHeader("Cookie", sb.toString());
             }
-            for (var entry : owner.headers().entrySet()) {
-                req = req.withAddedHeader(entry.getKey(), entry.getValue());
-            }
+            for (var entry : owner.headers().entrySet()) req = req.withAddedHeader(entry.getKey(), entry.getValue());
             return req;
         } catch (Exception e) {
-            api.logging().logToError("[BAC] Build owner request failed: " + e.getMessage());
+            api.logging().logToError("[BAC] Build owner request: " + e.getMessage());
             return null;
         }
     }
@@ -717,78 +936,23 @@ public class LibraryTab extends JPanel {
             List<String> options = new ArrayList<>();
             options.add("Inbox");
             folders.forEach(f -> options.add(f.name()));
-
-            String chosen = (String) JOptionPane.showInputDialog(this,
-                "Move to folder:", "Move Test Case",
-                JOptionPane.PLAIN_MESSAGE, null,
-                options.toArray(), options.get(0));
+            String chosen = (String) JOptionPane.showInputDialog(this, "Move to folder:",
+                "Move Test Case", JOptionPane.PLAIN_MESSAGE, null, options.toArray(), options.get(0));
             if (chosen == null) return;
-
-            Long targetFolderId;
-            if ("Inbox".equals(chosen)) {
-                targetFolderId = null;
-            } else {
-                targetFolderId = folders.stream()
-                    .filter(f -> f.name().equals(chosen))
-                    .map(FolderRecord::id)
-                    .findFirst().orElse(null);
-            }
-
+            Long targetFolderId = "Inbox".equals(chosen) ? null :
+                folders.stream().filter(f -> f.name().equals(chosen)).map(FolderRecord::id).findFirst().orElse(null);
             final Long fid = targetFolderId;
             long[] ids = Arrays.stream(selectedRows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
             loader.submit(() -> {
-                try {
-                    for (long id : ids) tcRepo.moveToFolder(id, fid);
-                    SwingUtilities.invokeLater(this::refresh);
-                } catch (Exception ex) {
-                    api.logging().logToError("[BAC] Move failed: " + ex.getMessage());
-                }
+                try { for (long id : ids) tcRepo.moveToFolder(id, fid); SwingUtilities.invokeLater(this::refresh); }
+                catch (Exception ex) { api.logging().logToError("[BAC] Move: " + ex.getMessage()); }
             });
-        } catch (Exception ex) {
-            api.logging().logToError("[BAC] Load folders for move dialog failed: " + ex.getMessage());
-        }
+        } catch (Exception ex) { api.logging().logToError("[BAC] Load folders for move: " + ex.getMessage()); }
     }
 
-    private void showRequestResponseViewer(TestCaseRow tc) {
-        loader.submit(() -> {
-            try {
-                byte[] reqBytes  = tcRepo.getRequestRaw(tc.id());
-                byte[] respBytes = tcRepo.getPrimaryBaselineResponse(tc.id());
-                SwingUtilities.invokeLater(() -> {
-                    JDialog dlg = new JDialog(
-                        (Frame) SwingUtilities.getWindowAncestor(this),
-                        tc.method() + " " + tc.url(), false);
-                    dlg.setSize(900, 600);
-                    dlg.setLocationRelativeTo(this);
-
-                    JSplitPane sp = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-                    sp.setDividerLocation(450);
-
-                    JTextArea reqArea  = monospaceArea(reqBytes);
-                    JTextArea respArea = monospaceArea(respBytes);
-                    sp.setLeftComponent(new JScrollPane(reqArea));
-                    sp.setRightComponent(new JScrollPane(respArea));
-
-                    dlg.add(sp);
-                    dlg.setVisible(true);
-                });
-            } catch (Exception ex) {
-                api.logging().logToError("[BAC] View request failed: " + ex.getMessage());
-            }
-        });
-    }
-
-    private JTextArea monospaceArea(byte[] data) {
-        JTextArea area = new JTextArea(data != null ? new String(data) : "(empty)");
-        area.setEditable(false);
-        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        return area;
-    }
-
-    // ---- Inline rename (F2 / double-click) ----------------------------
+    // ---- Inline rename / notes -------------------------------------------
 
     private void wireKeyBindings() {
-        // F2 = rename selected test case
         table.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
             .put(KeyStroke.getKeyStroke(KeyEvent.VK_F2, 0), "renameSelected");
         table.getActionMap().put("renameSelected", new AbstractAction() {
@@ -797,8 +961,6 @@ public class LibraryTab extends JPanel {
                 if (row >= 0) triggerRename(row);
             }
         });
-
-        // DELETE key = delete selected
         table.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
             .put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "deleteSelected");
         table.getActionMap().put("deleteSelected", new AbstractAction() {
@@ -811,12 +973,8 @@ public class LibraryTab extends JPanel {
                     if (confirm == JOptionPane.YES_OPTION) {
                         long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
                         loader.submit(() -> {
-                            try {
-                                for (long id : ids) tcRepo.delete(id);
-                                SwingUtilities.invokeLater(LibraryTab.this::refresh);
-                            } catch (Exception ex) {
-                                api.logging().logToError("[BAC] Delete failed: " + ex.getMessage());
-                            }
+                            try { for (long id : ids) tcRepo.delete(id); SwingUtilities.invokeLater(LibraryTab.this::refresh); }
+                            catch (Exception ex) { api.logging().logToError("[BAC] Delete: " + ex.getMessage()); }
                         });
                     }
                 }
@@ -825,7 +983,6 @@ public class LibraryTab extends JPanel {
     }
 
     private void wireInlineRename() {
-        // Double-click: name column (2) → rename; notes column (7) → edit notes
         table.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
@@ -842,20 +999,14 @@ public class LibraryTab extends JPanel {
     private void editNotes(int row) {
         TestCaseRow tc = tableModel.getRow(row);
         JTextArea area = new JTextArea(tc.notes() != null ? tc.notes() : "", 8, 40);
-        area.setLineWrap(true);
-        area.setWrapStyleWord(true);
+        area.setLineWrap(true); area.setWrapStyleWord(true);
         int ok = JOptionPane.showConfirmDialog(this, new JScrollPane(area),
             "Notes / Comment — " + (tc.name() != null ? tc.name() : tc.url()),
             JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (ok != JOptionPane.OK_OPTION) return;
-        String notes = area.getText();
         loader.submit(() -> {
-            try {
-                tcRepo.setNotes(tc.id(), notes);
-                SwingUtilities.invokeLater(this::reloadTable);
-            } catch (Exception ex) {
-                api.logging().logToError("[BAC] Save notes failed: " + ex.getMessage());
-            }
+            try { tcRepo.setNotes(tc.id(), area.getText()); SwingUtilities.invokeLater(this::reloadTable); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Save notes: " + ex.getMessage()); }
         });
     }
 
@@ -865,33 +1016,23 @@ public class LibraryTab extends JPanel {
             "Rename", JOptionPane.PLAIN_MESSAGE, null, null, tc.name());
         if (newName != null && !newName.isBlank()) {
             loader.submit(() -> {
-                try {
-                    tcRepo.rename(tc.id(), newName.trim());
-                    SwingUtilities.invokeLater(this::reloadTable);
-                } catch (Exception ex) {
-                    api.logging().logToError("[BAC] Rename failed: " + ex.getMessage());
-                }
+                try { tcRepo.rename(tc.id(), newName.trim()); SwingUtilities.invokeLater(this::reloadTable); }
+                catch (Exception ex) { api.logging().logToError("[BAC] Rename: " + ex.getMessage()); }
             });
         }
     }
 
-    // ---- Helpers -------------------------------------------------------
+    // ---- Helpers ---------------------------------------------------------
 
     private void reloadTable() {
         loader.submit(() -> {
             try {
                 List<TestCaseRow> rows = loadRows();
-                SwingUtilities.invokeLater(() -> {
-                    allRows = rows;
-                    applyFilter();
-                });
-            } catch (Exception e) {
-                api.logging().logToError("[BAC] Table reload failed: " + e.getMessage());
-            }
+                SwingUtilities.invokeLater(() -> { allRows = rows; applyFilter(); });
+            } catch (Exception e) { api.logging().logToError("[BAC] Table reload: " + e.getMessage()); }
         });
     }
 
-    /** Apply a manual color tag (or null to clear) to all selected test cases. */
     private void applyColorTag(String tag) {
         int[] rows = table.getSelectedRows();
         if (rows.length == 0) return;
@@ -899,15 +1040,12 @@ public class LibraryTab extends JPanel {
         loader.submit(() -> {
             try {
                 for (long id : ids) tcRepo.setColorTag(id, tag);
-                // If user is tagging colors, gently switch to MANUAL mode so it shows.
                 if (tag != null && !"MANUAL".equalsIgnoreCase(coloringMode)) {
                     db.setSetting("coloring_mode", "MANUAL");
                     coloringMode = "MANUAL";
                 }
                 SwingUtilities.invokeLater(this::reloadTable);
-            } catch (Exception ex) {
-                api.logging().logToError("[BAC] Set color failed: " + ex.getMessage());
-            }
+            } catch (Exception ex) { api.logging().logToError("[BAC] Set color: " + ex.getMessage()); }
         });
     }
 
@@ -917,28 +1055,25 @@ public class LibraryTab extends JPanel {
     }
 
     private void updateStatus(int count) {
-        statusLabel.setText("  " + count + " request" + (count == 1 ? "" : "s"));
+        int total = allRows.size();
+        statusLabel.setText("  " + count + (count != total ? " / " + total : "") +
+            " request" + (count == 1 ? "" : "s"));
     }
 
-    // ---- Inner: folder node -------------------------------------------
+    // ---- Inner: folder node ----------------------------------------------
 
     record FolderNode(Long id, String displayName) {
         @Override public String toString() { return displayName; }
     }
 
-    // ---- Inner: table model -------------------------------------------
+    // ---- Inner: table model ----------------------------------------------
 
     private static class TestCaseTableModel extends javax.swing.table.AbstractTableModel {
         private static final String[] COLS =
             {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Notes", "Captured"};
-
         private List<TestCaseRow> rows = new ArrayList<>();
 
-        void setRows(List<TestCaseRow> rows) {
-            this.rows = rows;
-            fireTableDataChanged();
-        }
-
+        void setRows(List<TestCaseRow> rows) { this.rows = rows; fireTableDataChanged(); }
         TestCaseRow getRow(int i) { return rows.get(i); }
 
         @Override public int getRowCount()    { return rows.size(); }
@@ -972,9 +1107,7 @@ public class LibraryTab extends JPanel {
             };
         }
 
-        private static String autoLabel(TestCaseRow r) {
-            return r.method() + " " + extractPath(r.url());
-        }
+        private static String autoLabel(TestCaseRow r) { return r.method() + " " + extractPath(r.url()); }
 
         private static String extractPath(String url) {
             if (url == null) return "/";
@@ -985,7 +1118,6 @@ public class LibraryTab extends JPanel {
                 if (path == null || path.isEmpty()) path = "/";
                 return query != null ? path + "?" + query : path;
             } catch (Exception e) {
-                // fallback: strip scheme+host
                 int slash = url.indexOf('/', url.indexOf("//") + 2);
                 return slash >= 0 ? url.substring(slash) : url;
             }
@@ -998,17 +1130,17 @@ public class LibraryTab extends JPanel {
         }
     }
 
-    // ---- Inner: cell renderer with method danger coloring -------------
+    // ---- Inner: cell renderer --------------------------------------------
 
     private class MethodAwareRenderer extends javax.swing.table.DefaultTableCellRenderer {
 
-        // Muted palette that works on both light and dark themes
-        private static final Color RED_BG    = new Color(0x4D, 0x1F, 0x1F, 160);
-        private static final Color ORANGE_BG = new Color(0x4D, 0x35, 0x0A, 160);
-        private static final Color YELLOW_BG = new Color(0x44, 0x40, 0x00, 160);
-        private static final Color GREEN_BG  = new Color(0x1F, 0x44, 0x1F, 160);
-        private static final Color BLUE_BG   = new Color(0x1A, 0x33, 0x52, 160);
-        private static final Color PURPLE_BG = new Color(0x3A, 0x1F, 0x4D, 160);
+        // Pastel overlays — same low-alpha approach as Burp Proxy history colours.
+        private static final Color RED_BG    = new Color(255, 80,  80,  55);
+        private static final Color ORANGE_BG = new Color(255, 155, 40,  55);
+        private static final Color YELLOW_BG = new Color(245, 215, 40,  55);
+        private static final Color GREEN_BG  = new Color(60,  200, 60,  55);
+        private static final Color BLUE_BG   = new Color(60,  140, 255, 55);
+        private static final Color PURPLE_BG = new Color(170, 70,  255, 55);
 
         @Override
         public Component getTableCellRendererComponent(JTable t, Object value,
@@ -1026,12 +1158,11 @@ public class LibraryTab extends JPanel {
             return c;
         }
 
-        /** Resolve the row background according to the active coloring mode. */
         private Color rowBackground(TestCaseRow r) {
             return switch (coloringMode == null ? "AUTO" : coloringMode.toUpperCase()) {
                 case "OFF"    -> null;
                 case "MANUAL" -> tagBg(r.colorTag());
-                default       -> methodBg(r.method()); // AUTO
+                default       -> methodBg(r.method());
             };
         }
 
@@ -1059,8 +1190,7 @@ public class LibraryTab extends JPanel {
         }
 
         private Color blend(Color base, Color overlay) {
-            int alpha = overlay.getAlpha();
-            float a = alpha / 255f;
+            float a = overlay.getAlpha() / 255f;
             int r = Math.min(255, (int)(base.getRed()   * (1 - a) + overlay.getRed()   * a));
             int g = Math.min(255, (int)(base.getGreen() * (1 - a) + overlay.getGreen() * a));
             int b = Math.min(255, (int)(base.getBlue()  * (1 - a) + overlay.getBlue()  * a));
@@ -1068,7 +1198,7 @@ public class LibraryTab extends JPanel {
         }
     }
 
-    // ---- Inner: folder tree renderer ----------------------------------
+    // ---- Inner: folder tree renderer -------------------------------------
 
     private static class FolderTreeRenderer extends DefaultTreeCellRenderer {
         @Override
@@ -1078,11 +1208,9 @@ public class LibraryTab extends JPanel {
             if (value instanceof DefaultMutableTreeNode node &&
                 node.getUserObject() instanceof FolderNode fn) {
                 setText(fn.displayName());
-                // Use folder icon from UIManager for folders, file icon for leaves
-                setIcon(fn.id() == null
-                    ? UIManager.getIcon("FileView.computerIcon")
-                    : (leaf ? UIManager.getIcon("FileView.directoryIcon")
-                            : UIManager.getIcon("FileView.directoryIcon")));
+                setIcon(UIManager.getIcon("FileView.directoryIcon"));
+                // Inbox uses a different icon
+                if (fn.id() == null) setIcon(UIManager.getIcon("FileView.computerIcon"));
             }
             return this;
         }

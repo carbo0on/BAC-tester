@@ -377,16 +377,7 @@ public class RunEngine {
 
     private long getPrimaryBaselineId(long tcId) {
         try {
-            String sql = "SELECT primary_baseline_id FROM test_cases WHERE id = ?";
-            try (var ps = dbManager.getConnection().prepareStatement(sql)) {
-                ps.setLong(1, tcId);
-                try (var rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        long v = rs.getLong(1);
-                        return rs.wasNull() ? -1 : v;
-                    }
-                }
-            }
+            return tcRepo.getPrimaryBaselineId(tcId).orElse(-1L);
         } catch (Exception ignored) {}
         return -1;
     }

@@ -43,14 +43,14 @@ public class TestRunTab extends JPanel {
     private static final DateTimeFormatter FMT =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
 
-    // ---- Colors (muted, theme-aware via alpha blend) -------------------
-    private static final Color POTENTIAL_BAC_BG   = new Color(0x7A, 0x1F, 0x1F, 180);
-    private static final Color LIKELY_ENFORCED_BG = new Color(0x1F, 0x5C, 0x1F, 180);
-    private static final Color EXPECTED_OK_BG     = new Color(0x55, 0x55, 0x55, 120);
-    private static final Color ANOMALY_BG         = new Color(0x7A, 0x4A, 0x00, 180);
-    private static final Color REVIEW_BG          = new Color(0x6A, 0x5C, 0x00, 180);
-    private static final Color SKIPPED_BG         = new Color(0x40, 0x40, 0x40, 80);
-    private static final Color ERROR_BG           = new Color(0x50, 0x00, 0x50, 160);
+    // Pastel tints — same low-alpha approach as Burp Proxy history colours.
+    private static final Color POTENTIAL_BAC_BG   = new Color(255, 80,  80,  65);
+    private static final Color LIKELY_ENFORCED_BG = new Color(60,  200, 60,  55);
+    private static final Color EXPECTED_OK_BG     = new Color(150, 150, 150, 40);
+    private static final Color ANOMALY_BG         = new Color(255, 155, 40,  60);
+    private static final Color REVIEW_BG          = new Color(245, 215, 40,  60);
+    private static final Color SKIPPED_BG         = new Color(130, 130, 130, 35);
+    private static final Color ERROR_BG           = new Color(200, 60,  200, 55);
 
     // Verdict label text
     private static final String[] VERDICT_LABELS = {
@@ -84,6 +84,8 @@ public class TestRunTab extends JPanel {
     private ResultsTableModel tableModel;
     private JTable resultsTable;
     private String activeVerdictFilter = null;
+    private JTextField resultsSearch;
+    private JComboBox<String> statusFilterCombo;
 
     // Verdict summary counts (updated as results stream in)
     private final Map<String, Integer> verdictCounts = new HashMap<>();
@@ -274,12 +276,18 @@ public class TestRunTab extends JPanel {
         }
     }
 
+    private void applyResultsFilter() {
+        String search = resultsSearch != null ? resultsSearch.getText().trim().toLowerCase() : "";
+        String statusSel = statusFilterCombo != null ? (String) statusFilterCombo.getSelectedItem() : "All Status";
+        tableModel.applyFilter(activeVerdictFilter, search, statusSel);
+    }
+
     private JPanel buildResultsPanel() {
         JPanel panel = new JPanel(new BorderLayout(0, 4));
 
-        // Filter bar
+        // Filter bar row 1: verdict toggles
         JPanel filterBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        filterBar.add(new JLabel("Filter: "));
+        filterBar.add(new JLabel("Verdict: "));
         ButtonGroup bg = new ButtonGroup();
         for (int i = 0; i < VERDICT_LABELS.length; i++) {
             final String filter = VERDICT_FILTERS[i];
@@ -289,11 +297,45 @@ public class TestRunTab extends JPanel {
             if (i == 0) btn.setSelected(true);
             btn.addActionListener(e -> {
                 activeVerdictFilter = filter;
-                tableModel.applyFilter(filter);
+                applyResultsFilter();
             });
             filterBar.add(btn);
         }
-        panel.add(filterBar, BorderLayout.NORTH);
+
+        // Filter bar row 2: search + status
+        JPanel searchBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        searchBar.add(new JLabel("Search:"));
+        resultsSearch = new JTextField(18);
+        resultsSearch.setToolTipText("Filter by name, host, or URL");
+        resultsSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e)  { applyResultsFilter(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e)  { applyResultsFilter(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { applyResultsFilter(); }
+        });
+        searchBar.add(resultsSearch);
+
+        searchBar.add(new JLabel("  Status:"));
+        statusFilterCombo = new JComboBox<>(new String[]{
+            "All Status", "2xx (OK)", "3xx (Redirect)", "4xx (Client err)", "5xx (Server err)",
+            "200", "301", "302", "401", "403", "404", "500"
+        });
+        statusFilterCombo.setPreferredSize(new Dimension(140, 24));
+        statusFilterCombo.addActionListener(e -> applyResultsFilter());
+        searchBar.add(statusFilterCombo);
+
+        JButton clearBtn = new JButton("✕ Clear");
+        clearBtn.setFont(clearBtn.getFont().deriveFont(11f));
+        clearBtn.addActionListener(e -> {
+            resultsSearch.setText("");
+            statusFilterCombo.setSelectedIndex(0);
+            applyResultsFilter();
+        });
+        searchBar.add(clearBtn);
+
+        JPanel northPanel = new JPanel(new BorderLayout());
+        northPanel.add(filterBar, BorderLayout.NORTH);
+        northPanel.add(searchBar, BorderLayout.SOUTH);
+        panel.add(northPanel, BorderLayout.NORTH);
 
         // Table
         tableModel = new ResultsTableModel();
@@ -428,13 +470,7 @@ public class TestRunTab extends JPanel {
 
     private String readSetting(String key) {
         try {
-            String sql = "SELECT value FROM settings WHERE key = ?";
-            try (var ps = dbManager.getConnection().prepareStatement(sql)) {
-                ps.setString(1, key);
-                try (var rs = ps.executeQuery()) {
-                    return rs.next() ? rs.getString("value") : null;
-                }
-            }
+            return dbManager.getSetting(key);
         } catch (Exception ignored) {}
         return null;
     }
@@ -518,9 +554,9 @@ public class TestRunTab extends JPanel {
 
         void addResult(RunRepository.ResultRecord r) {
             allRows.add(r);
-            rows.add(r); // will be filtered next repaint if filter active
-            int idx = rows.size() - 1;
-            fireTableRowsInserted(idx, idx);
+            // Only show if it passes current filter state
+            rows.add(r);
+            fireTableRowsInserted(rows.size() - 1, rows.size() - 1);
         }
 
         void clear() {
@@ -529,12 +565,39 @@ public class TestRunTab extends JPanel {
             fireTableDataChanged();
         }
 
-        void applyFilter(String verdict) {
+        void applyFilter(String verdict, String search, String statusSel) {
             rows.clear();
             for (var r : allRows) {
-                if (verdict == null || verdict.equals(r.verdict())) rows.add(r);
+                if (verdict != null && !verdict.equals(r.verdict())) continue;
+                if (!matchesSearch(r, search)) continue;
+                if (!matchesStatus(r, statusSel)) continue;
+                rows.add(r);
             }
             fireTableDataChanged();
+        }
+
+        private static boolean matchesSearch(RunRepository.ResultRecord r, String q) {
+            if (q == null || q.isBlank()) return true;
+            return ci(r.testCaseName(), q) || ci(r.host(), q) || ci(r.url(), q) || ci(r.method(), q);
+        }
+
+        private static boolean ci(String s, String q) {
+            return s != null && s.toLowerCase().contains(q);
+        }
+
+        private static boolean matchesStatus(RunRepository.ResultRecord r, String sel) {
+            if (sel == null || sel.startsWith("All")) return true;
+            int st = r.newStatus();
+            return switch (sel) {
+                case "2xx (OK)"          -> st >= 200 && st < 300;
+                case "3xx (Redirect)"    -> st >= 300 && st < 400;
+                case "4xx (Client err)"  -> st >= 400 && st < 500;
+                case "5xx (Server err)"  -> st >= 500 && st < 600;
+                default -> {
+                    try { yield Integer.parseInt(sel.split(" ")[0]) == st; }
+                    catch (NumberFormatException e) { yield true; }
+                }
+            };
         }
 
         @Override public int getRowCount() { return rows.size(); }

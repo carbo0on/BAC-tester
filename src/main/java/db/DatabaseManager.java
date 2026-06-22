@@ -38,9 +38,9 @@ public class DatabaseManager {
         connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
 
         try (Statement st = connection.createStatement()) {
-            // WAL mode improves concurrent read throughput
             st.execute("PRAGMA journal_mode=WAL");
             st.execute("PRAGMA foreign_keys=ON");
+            st.execute("PRAGMA busy_timeout=5000");
         }
 
         createSchema();
@@ -216,8 +216,42 @@ public class DatabaseManager {
 
     // ---- public API -------------------------------------------------------
 
+    /**
+     * Returns the live connection, auto-reconnecting if the underlying socket
+     * has been closed or invalidated (e.g., after a long idle period or an
+     * OS-level file-handle reclaim).
+     *
+     * All callers MUST hold the lock on this DatabaseManager before calling
+     * any JDBC method on the returned Connection.  Repositories achieve this
+     * by using  synchronized (db) { … }  blocks instead of instance-level
+     * synchronized methods, so every JDBC call across every repository goes
+     * through a single monitor.
+     */
     public synchronized Connection getConnection() {
+        try {
+            if (connection == null || isConnectionBroken()) {
+                logging.logToOutput("[BAC] Re-opening database connection at: " + dbPath);
+                try { if (connection != null) connection.close(); } catch (Exception ignored) {}
+                connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                try (Statement st = connection.createStatement()) {
+                    st.execute("PRAGMA journal_mode=WAL");
+                    st.execute("PRAGMA foreign_keys=ON");
+                    st.execute("PRAGMA busy_timeout=5000");  // wait up to 5 s instead of failing immediately
+                }
+            }
+        } catch (Exception e) {
+            logging.logToError("[BAC] Database reconnect failed: " + e.getMessage());
+        }
         return connection;
+    }
+
+    private boolean isConnectionBroken() {
+        try {
+            // isValid() sends a lightweight probe query; timeout=1 s
+            return connection.isClosed() || !connection.isValid(1);
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     public synchronized String getSetting(String key) throws SQLException {

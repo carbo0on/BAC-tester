@@ -10,7 +10,6 @@ import javax.swing.*;
 import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -256,12 +255,13 @@ public class CompareTab extends JPanel {
         if (currentResultId > 0) {
             try {
                 // quick check
-                String sql = "SELECT reviewed FROM results WHERE id = ?";
-                try (Connection c = dbManager.getConnection();
-                     PreparedStatement ps = c.prepareStatement(sql)) {
-                    ps.setLong(1, currentResultId);
-                    try (var rs = ps.executeQuery()) {
-                        if (rs.next()) currentReviewed = rs.getInt(1) == 1;
+                synchronized (dbManager) {
+                    String sql = "SELECT reviewed FROM results WHERE id = ?";
+                    try (PreparedStatement ps = dbManager.getConnection().prepareStatement(sql)) {
+                        ps.setLong(1, currentResultId);
+                        try (var rs = ps.executeQuery()) {
+                            if (rs.next()) currentReviewed = rs.getInt(1) == 1;
+                        }
                     }
                 }
             } catch (Exception ignored) {}
@@ -755,27 +755,27 @@ public class CompareTab extends JPanel {
         loader.submit(() -> {
             try {
                 String sql = "SELECT value FROM settings WHERE key = 'ignore_patterns'";
-                try (var st = dbManager.getConnection().createStatement();
-                     var rs = st.executeQuery(sql)) {
-                    if (rs.next()) {
-                        String json = rs.getString(1);
-                        if (json != null) {
-                            // Parse JSON array of strings: ["regex1","regex2"]
-                            List<Pattern> pats = new ArrayList<>();
-                            // Simple extraction (avoid pulling in Gson for this)
-                            json = json.trim();
-                            if (json.startsWith("[") && json.endsWith("]")) {
-                                json = json.substring(1, json.length() - 1);
-                                for (String part : json.split(",")) {
-                                    String s = part.trim();
-                                    if (s.startsWith("\"") && s.endsWith("\""))
-                                        s = s.substring(1, s.length() - 1);
-                                    if (!s.isBlank()) {
-                                        try { pats.add(Pattern.compile(s)); } catch (Exception ignored) {}
+                synchronized (dbManager) {
+                    try (var st = dbManager.getConnection().createStatement();
+                         var rs = st.executeQuery(sql)) {
+                        if (rs.next()) {
+                            String json = rs.getString(1);
+                            if (json != null) {
+                                List<Pattern> pats = new ArrayList<>();
+                                json = json.trim();
+                                if (json.startsWith("[") && json.endsWith("]")) {
+                                    json = json.substring(1, json.length() - 1);
+                                    for (String part : json.split(",")) {
+                                        String s = part.trim();
+                                        if (s.startsWith("\"") && s.endsWith("\""))
+                                            s = s.substring(1, s.length() - 1);
+                                        if (!s.isBlank()) {
+                                            try { pats.add(Pattern.compile(s)); } catch (Exception ignored) {}
+                                        }
                                     }
                                 }
+                                ignorePatterns = pats;
                             }
-                            ignorePatterns = pats;
                         }
                     }
                 }

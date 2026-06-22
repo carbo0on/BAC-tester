@@ -215,10 +215,7 @@ public class SettingsTab extends JPanel {
         JButton importBtn = new JButton("Import Library…");
         exportBtn.addActionListener(e -> exportImport.showExportDialog(this));
         importBtn.addActionListener(e -> exportImport.showImportDialog(this, count -> {
-            JOptionPane.showMessageDialog(this,
-                "Import complete: " + count + " test case(s) imported.",
-                "Import Done", JOptionPane.INFORMATION_MESSAGE);
-            if (onSaved != null) onSaved.run(); // refresh library
+            if (onSaved != null) onSaved.run(); // refresh library after import
         }));
 
         JPanel ioPan = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));

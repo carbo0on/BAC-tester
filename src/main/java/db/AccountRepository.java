@@ -40,95 +40,107 @@ public class AccountRepository {
 
     // ---- Write ---------------------------------------------------------
 
-    public synchronized long create(String name, String roleDesc,
-                                    Map<String, String> cookies,
-                                    Map<String, String> headers,
-                                    String expectedAccess) throws SQLException {
-        long now = Instant.now().getEpochSecond();
-        String sql = """
-            INSERT INTO accounts (name, role_desc, auth_material, expected_access, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """;
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, name);
-            ps.setString(2, roleDesc);
-            ps.setString(3, serialize(cookies, headers));
-            ps.setString(4, expectedAccess != null ? expectedAccess : "UNKNOWN");
-            ps.setLong(5, now);
-            ps.setLong(6, now);
-            ps.executeUpdate();
-            try (ResultSet rs = ps.getGeneratedKeys()) {
-                return rs.next() ? rs.getLong(1) : -1;
+    public long create(String name, String roleDesc,
+                       Map<String, String> cookies,
+                       Map<String, String> headers,
+                       String expectedAccess) throws SQLException {
+        synchronized (db) {
+            long now = Instant.now().getEpochSecond();
+            String sql = """
+                INSERT INTO accounts (name, role_desc, auth_material, expected_access, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """;
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, name);
+                ps.setString(2, roleDesc);
+                ps.setString(3, serialize(cookies, headers));
+                ps.setString(4, expectedAccess != null ? expectedAccess : "UNKNOWN");
+                ps.setLong(5, now);
+                ps.setLong(6, now);
+                ps.executeUpdate();
+                try (ResultSet rs = ps.getGeneratedKeys()) {
+                    return rs.next() ? rs.getLong(1) : -1;
+                }
             }
         }
     }
 
-    public synchronized void update(long id, String name, String roleDesc,
-                                    Map<String, String> cookies,
-                                    Map<String, String> headers,
-                                    String expectedAccess) throws SQLException {
-        String sql = """
-            UPDATE accounts SET name=?, role_desc=?, auth_material=?,
-                                expected_access=?, updated_at=?
-            WHERE id=?
-            """;
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, name);
-            ps.setString(2, roleDesc);
-            ps.setString(3, serialize(cookies, headers));
-            ps.setString(4, expectedAccess != null ? expectedAccess : "UNKNOWN");
-            ps.setLong(5, Instant.now().getEpochSecond());
-            ps.setLong(6, id);
-            ps.executeUpdate();
+    public void update(long id, String name, String roleDesc,
+                       Map<String, String> cookies,
+                       Map<String, String> headers,
+                       String expectedAccess) throws SQLException {
+        synchronized (db) {
+            String sql = """
+                UPDATE accounts SET name=?, role_desc=?, auth_material=?,
+                                    expected_access=?, updated_at=?
+                WHERE id=?
+                """;
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, name);
+                ps.setString(2, roleDesc);
+                ps.setString(3, serialize(cookies, headers));
+                ps.setString(4, expectedAccess != null ? expectedAccess : "UNKNOWN");
+                ps.setLong(5, Instant.now().getEpochSecond());
+                ps.setLong(6, id);
+                ps.executeUpdate();
+            }
         }
     }
 
-    public synchronized void setCanary(long accountId, Long testCaseId) throws SQLException {
-        String sql = "UPDATE accounts SET canary_request_id=?, updated_at=? WHERE id=?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            if (testCaseId != null) ps.setLong(1, testCaseId); else ps.setNull(1, Types.INTEGER);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, accountId);
-            ps.executeUpdate();
+    public void setCanary(long accountId, Long testCaseId) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE accounts SET canary_request_id=?, updated_at=? WHERE id=?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                if (testCaseId != null) ps.setLong(1, testCaseId); else ps.setNull(1, Types.INTEGER);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, accountId);
+                ps.executeUpdate();
+            }
         }
     }
 
-    public synchronized void delete(long id) throws SQLException {
-        String sql = "DELETE FROM accounts WHERE id=?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, id);
-            ps.executeUpdate();
+    public void delete(long id) throws SQLException {
+        synchronized (db) {
+            String sql = "DELETE FROM accounts WHERE id=?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, id);
+                ps.executeUpdate();
+            }
         }
     }
 
     // ---- Read ----------------------------------------------------------
 
-    public synchronized List<AccountRecord> getAll() throws SQLException {
-        String sql = """
-            SELECT id, name, role_desc, auth_material, expected_access,
-                   canary_request_id, created_at, updated_at
-            FROM accounts ORDER BY name
-            """;
-        List<AccountRecord> result = new ArrayList<>();
-        try (Statement st = db.getConnection().createStatement();
-             ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                result.add(mapRow(rs));
+    public List<AccountRecord> getAll() throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT id, name, role_desc, auth_material, expected_access,
+                       canary_request_id, created_at, updated_at
+                FROM accounts ORDER BY name
+                """;
+            List<AccountRecord> result = new ArrayList<>();
+            try (Statement st = db.getConnection().createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next()) {
+                    result.add(mapRow(rs));
+                }
             }
+            return result;
         }
-        return result;
     }
 
-    public synchronized Optional<AccountRecord> getById(long id) throws SQLException {
-        String sql = """
-            SELECT id, name, role_desc, auth_material, expected_access,
-                   canary_request_id, created_at, updated_at
-            FROM accounts WHERE id=?
-            """;
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? Optional.of(mapRow(rs)) : Optional.empty();
+    public Optional<AccountRecord> getById(long id) throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT id, name, role_desc, auth_material, expected_access,
+                       canary_request_id, created_at, updated_at
+                FROM accounts WHERE id=?
+                """;
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? Optional.of(mapRow(rs)) : Optional.empty();
+                }
             }
         }
     }

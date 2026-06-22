@@ -69,279 +69,308 @@ public class TestCaseRepository {
      * Saves a test case and its initial "original" baseline atomically.
      * Returns the new test_case.id.
      */
-    public synchronized long save(SaveRequest req) throws SQLException {
-        Connection conn = db.getConnection();
-        boolean prevAutoCommit = conn.getAutoCommit();
-        try {
-            conn.setAutoCommit(false);
-            long now = Instant.now().getEpochSecond();
-            boolean isStateChanging = isStateChangingMethod(req.method());
-            // Coerce a missing response to an empty baseline so requests captured
-            // from Repeater before they are sent can still be saved.
-            byte[] responseRaw = req.responseRaw() != null ? req.responseRaw() : new byte[0];
-            byte[] requestRaw  = req.requestRaw()  != null ? req.requestRaw()  : new byte[0];
-            String baselineLabel = responseRaw.length == 0 ? "no-response" : "original";
+    public long save(SaveRequest req) throws SQLException {
+        synchronized (db) {
+            Connection conn = db.getConnection();
+            boolean prevAutoCommit = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                long now = Instant.now().getEpochSecond();
+                boolean isStateChanging = isStateChangingMethod(req.method());
+                byte[] responseRaw = req.responseRaw() != null ? req.responseRaw() : new byte[0];
+                byte[] requestRaw  = req.requestRaw()  != null ? req.requestRaw()  : new byte[0];
+                String baselineLabel = responseRaw.length == 0 ? "no-response" : "original";
 
-            // 1. Insert test case
-            String insertTc = """
-                INSERT INTO test_cases
-                    (name, notes, folder_id, owner_acct_id, method, url, host, port,
-                     is_https, request_raw, is_state_changing, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-            long tcId;
-            try (PreparedStatement ps = conn.prepareStatement(insertTc, Statement.RETURN_GENERATED_KEYS)) {
-                ps.setString(1, req.name() != null ? req.name() : autoName(req));
-                ps.setString(2, req.notes());
-                if (req.folderId() != null) ps.setLong(3, req.folderId()); else ps.setNull(3, Types.INTEGER);
-                if (req.ownerAccountId() != null) ps.setLong(4, req.ownerAccountId()); else ps.setNull(4, Types.INTEGER);
-                ps.setString(5, req.method());
-                ps.setString(6, req.url());
-                ps.setString(7, req.host());
-                ps.setInt(8, req.port());
-                ps.setInt(9, req.isHttps() ? 1 : 0);
-                ps.setBytes(10, requestRaw);
-                ps.setInt(11, isStateChanging ? 1 : 0);
-                ps.setLong(12, now);
-                ps.setLong(13, now);
-                ps.executeUpdate();
-                try (ResultSet rs = ps.getGeneratedKeys()) {
-                    tcId = rs.next() ? rs.getLong(1) : -1;
+                // 1. Insert test case
+                String insertTc = """
+                    INSERT INTO test_cases
+                        (name, notes, folder_id, owner_acct_id, method, url, host, port,
+                         is_https, request_raw, is_state_changing, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """;
+                long tcId;
+                try (PreparedStatement ps = conn.prepareStatement(insertTc, Statement.RETURN_GENERATED_KEYS)) {
+                    ps.setString(1, req.name() != null ? req.name() : autoName(req));
+                    ps.setString(2, req.notes());
+                    if (req.folderId() != null) ps.setLong(3, req.folderId()); else ps.setNull(3, Types.INTEGER);
+                    if (req.ownerAccountId() != null) ps.setLong(4, req.ownerAccountId()); else ps.setNull(4, Types.INTEGER);
+                    ps.setString(5, req.method());
+                    ps.setString(6, req.url());
+                    ps.setString(7, req.host());
+                    ps.setInt(8, req.port());
+                    ps.setInt(9, req.isHttps() ? 1 : 0);
+                    ps.setBytes(10, requestRaw);
+                    ps.setInt(11, isStateChanging ? 1 : 0);
+                    ps.setLong(12, now);
+                    ps.setLong(13, now);
+                    ps.executeUpdate();
+                    try (ResultSet rs = ps.getGeneratedKeys()) {
+                        tcId = rs.next() ? rs.getLong(1) : -1;
+                    }
                 }
-            }
 
-            // 2. Insert initial baseline
-            String insertBl = """
-                INSERT INTO baselines
-                    (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-            long blId;
-            try (PreparedStatement ps = conn.prepareStatement(insertBl, Statement.RETURN_GENERATED_KEYS)) {
-                ps.setLong(1, tcId);
-                if (req.ownerAccountId() != null) ps.setLong(2, req.ownerAccountId()); else ps.setNull(2, Types.INTEGER);
-                ps.setString(3, baselineLabel);
-                ps.setInt(4, req.responseStatus());
-                ps.setInt(5, req.responseLength());
-                ps.setString(6, sha256(responseRaw));
-                ps.setBytes(7, responseRaw);
-                ps.setLong(8, now);
-                ps.executeUpdate();
-                try (ResultSet rs = ps.getGeneratedKeys()) {
-                    blId = rs.next() ? rs.getLong(1) : -1;
+                // 2. Insert initial baseline
+                String insertBl = """
+                    INSERT INTO baselines
+                        (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """;
+                long blId;
+                try (PreparedStatement ps = conn.prepareStatement(insertBl, Statement.RETURN_GENERATED_KEYS)) {
+                    ps.setLong(1, tcId);
+                    if (req.ownerAccountId() != null) ps.setLong(2, req.ownerAccountId()); else ps.setNull(2, Types.INTEGER);
+                    ps.setString(3, baselineLabel);
+                    ps.setInt(4, req.responseStatus());
+                    ps.setInt(5, req.responseLength());
+                    ps.setString(6, sha256(responseRaw));
+                    ps.setBytes(7, responseRaw);
+                    ps.setLong(8, now);
+                    ps.executeUpdate();
+                    try (ResultSet rs = ps.getGeneratedKeys()) {
+                        blId = rs.next() ? rs.getLong(1) : -1;
+                    }
                 }
-            }
 
-            // 3. Link primary baseline
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "UPDATE test_cases SET primary_baseline_id = ? WHERE id = ?")) {
-                ps.setLong(1, blId);
-                ps.setLong(2, tcId);
-                ps.executeUpdate();
-            }
+                // 3. Link primary baseline
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE test_cases SET primary_baseline_id = ? WHERE id = ?")) {
+                    ps.setLong(1, blId);
+                    ps.setLong(2, tcId);
+                    ps.executeUpdate();
+                }
 
-            conn.commit();
-            return tcId;
-        } catch (Exception e) {
-            conn.rollback();
-            throw (e instanceof SQLException se) ? se : new SQLException(e);
-        } finally {
-            conn.setAutoCommit(prevAutoCommit);
+                conn.commit();
+                return tcId;
+            } catch (Exception e) {
+                conn.rollback();
+                throw (e instanceof SQLException se) ? se : new SQLException(e);
+            } finally {
+                conn.setAutoCommit(prevAutoCommit);
+            }
         }
     }
 
     // ---- Read ----------------------------------------------------------
 
-    public synchronized List<TestCaseRow> getByFolder(Long folderId) throws SQLException {
-        if (folderId == null) {
-            return query("tc.folder_id IS NULL", ps -> {});
-        } else {
-            return query("tc.folder_id = ?", ps -> ps.setLong(1, folderId));
+    public List<TestCaseRow> getByFolder(Long folderId) throws SQLException {
+        synchronized (db) {
+            if (folderId == null) {
+                return query("tc.folder_id IS NULL", ps -> {});
+            } else {
+                return query("tc.folder_id = ?", ps -> ps.setLong(1, folderId));
+            }
         }
     }
 
-    public synchronized List<TestCaseRow> getAll() throws SQLException {
-        return query("1=1", ps -> {});
+    public List<TestCaseRow> getAll() throws SQLException {
+        synchronized (db) {
+            return query("1=1", ps -> {});
+        }
     }
 
-    public synchronized Optional<TestCaseRow> getById(long id) throws SQLException {
-        List<TestCaseRow> rows = query("tc.id = ?", ps -> ps.setLong(1, id));
-        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    public Optional<TestCaseRow> getById(long id) throws SQLException {
+        synchronized (db) {
+            List<TestCaseRow> rows = query("tc.id = ?", ps -> ps.setLong(1, id));
+            return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+        }
     }
 
-    public synchronized Optional<Long> getPrimaryBaselineId(long tcId) throws SQLException {
-        String sql = "SELECT primary_baseline_id FROM test_cases WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, tcId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    long v = rs.getLong(1);
-                    return rs.wasNull() ? Optional.empty() : Optional.of(v);
+    public Optional<Long> getPrimaryBaselineId(long tcId) throws SQLException {
+        synchronized (db) {
+            String sql = "SELECT primary_baseline_id FROM test_cases WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, tcId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        long v = rs.getLong(1);
+                        return rs.wasNull() ? Optional.empty() : Optional.of(v);
+                    }
+                }
+            }
+            return Optional.empty();
+        }
+    }
+
+    public byte[] getRequestRaw(long id) throws SQLException {
+        synchronized (db) {
+            String sql = "SELECT request_raw FROM test_cases WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getBytes("request_raw") : null;
                 }
             }
         }
-        return Optional.empty();
     }
 
-    public synchronized byte[] getRequestRaw(long id) throws SQLException {
-        String sql = "SELECT request_raw FROM test_cases WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getBytes("request_raw") : null;
-            }
-        }
-    }
-
-    public synchronized byte[] getPrimaryBaselineResponse(long testCaseId) throws SQLException {
-        String sql = """
-            SELECT b.response_raw FROM baselines b
-            JOIN test_cases tc ON tc.primary_baseline_id = b.id
-            WHERE tc.id = ?
-            """;
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, testCaseId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getBytes("response_raw") : null;
-            }
-        }
-    }
-
-    public synchronized List<BaselineRecord> getBaselines(long testCaseId) throws SQLException {
-        String sql = """
-            SELECT id, test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at
-            FROM baselines WHERE test_case_id = ? ORDER BY captured_at
-            """;
-        List<BaselineRecord> result = new ArrayList<>();
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, testCaseId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    Long acctId = rs.getLong("account_id");
-                    result.add(new BaselineRecord(
-                        rs.getLong("id"),
-                        rs.getLong("test_case_id"),
-                        rs.wasNull() ? null : acctId,
-                        rs.getString("label"),
-                        rs.getInt("status"),
-                        rs.getInt("length"),
-                        rs.getString("body_hash"),
-                        rs.getBytes("response_raw"),
-                        rs.getLong("captured_at")
-                    ));
+    public byte[] getPrimaryBaselineResponse(long testCaseId) throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT b.response_raw FROM baselines b
+                JOIN test_cases tc ON tc.primary_baseline_id = b.id
+                WHERE tc.id = ?
+                """;
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, testCaseId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getBytes("response_raw") : null;
                 }
             }
         }
-        return result;
+    }
+
+    public List<BaselineRecord> getBaselines(long testCaseId) throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT id, test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at
+                FROM baselines WHERE test_case_id = ? ORDER BY captured_at
+                """;
+            List<BaselineRecord> result = new ArrayList<>();
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, testCaseId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        Long acctId = rs.getLong("account_id");
+                        result.add(new BaselineRecord(
+                            rs.getLong("id"),
+                            rs.getLong("test_case_id"),
+                            rs.wasNull() ? null : acctId,
+                            rs.getString("label"),
+                            rs.getInt("status"),
+                            rs.getInt("length"),
+                            rs.getString("body_hash"),
+                            rs.getBytes("response_raw"),
+                            rs.getLong("captured_at")
+                        ));
+                    }
+                }
+            }
+            return result;
+        }
     }
 
     // ---- Baseline write ------------------------------------------------
 
     /** Add a new versioned baseline for a test case. Returns new baseline id. */
-    public synchronized long addBaseline(long tcId, Long accountId, String label,
-                                          int status, int length, byte[] responseRaw) throws SQLException {
-        long now = Instant.now().getEpochSecond();
-        String sql = """
-            INSERT INTO baselines (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """;
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setLong(1, tcId);
-            if (accountId != null) ps.setLong(2, accountId); else ps.setNull(2, Types.INTEGER);
-            ps.setString(3, label != null ? label : "baseline");
-            ps.setInt(4, status);
-            ps.setInt(5, length);
-            ps.setString(6, sha256(responseRaw));
-            ps.setBytes(7, responseRaw);
-            ps.setLong(8, now);
-            ps.executeUpdate();
-            try (ResultSet rs = ps.getGeneratedKeys()) {
-                return rs.next() ? rs.getLong(1) : -1;
+    public long addBaseline(long tcId, Long accountId, String label,
+                            int status, int length, byte[] responseRaw) throws SQLException {
+        synchronized (db) {
+            long now = Instant.now().getEpochSecond();
+            String sql = """
+                INSERT INTO baselines (test_case_id, account_id, label, status, length, body_hash, response_raw, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setLong(1, tcId);
+                if (accountId != null) ps.setLong(2, accountId); else ps.setNull(2, Types.INTEGER);
+                ps.setString(3, label != null ? label : "baseline");
+                ps.setInt(4, status);
+                ps.setInt(5, length);
+                ps.setString(6, sha256(responseRaw));
+                ps.setBytes(7, responseRaw);
+                ps.setLong(8, now);
+                ps.executeUpdate();
+                try (ResultSet rs = ps.getGeneratedKeys()) {
+                    return rs.next() ? rs.getLong(1) : -1;
+                }
             }
         }
     }
 
     /** Set primary_baseline_id for a test case (does NOT delete old baselines). */
-    public synchronized void setPrimaryBaseline(long tcId, long baselineId) throws SQLException {
-        String sql = "UPDATE test_cases SET primary_baseline_id = ?, updated_at = ? WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, baselineId);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, tcId);
-            ps.executeUpdate();
+    public void setPrimaryBaseline(long tcId, long baselineId) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET primary_baseline_id = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, baselineId);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, tcId);
+                ps.executeUpdate();
+            }
         }
     }
 
     // ---- Update --------------------------------------------------------
 
-    public synchronized void rename(long id, String name) throws SQLException {
-        String sql = "UPDATE test_cases SET name = ?, updated_at = ? WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, name);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, id);
-            ps.executeUpdate();
-        }
-    }
-
-    public synchronized void setNotes(long id, String notes) throws SQLException {
-        String sql = "UPDATE test_cases SET notes = ?, updated_at = ? WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, notes);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, id);
-            ps.executeUpdate();
-        }
-    }
-
-    /** Set (or clear with null) a manual color tag like "RED"/"ORANGE"/"GREEN"/"BLUE". */
-    public synchronized void setColorTag(long id, String colorTag) throws SQLException {
-        String sql = "UPDATE test_cases SET color_tag = ?, updated_at = ? WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setString(1, colorTag);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, id);
-            ps.executeUpdate();
-        }
-    }
-
-    public synchronized String getNotes(long id) throws SQLException {
-        String sql = "SELECT notes FROM test_cases WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            ps.setLong(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString("notes") : null;
+    public void rename(long id, String name) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET name = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, name);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, id);
+                ps.executeUpdate();
             }
         }
     }
 
-    public synchronized void moveToFolder(long id, Long folderId) throws SQLException {
-        String sql = "UPDATE test_cases SET folder_id = ?, updated_at = ? WHERE id = ?";
-        try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-            if (folderId != null) ps.setLong(1, folderId); else ps.setNull(1, Types.INTEGER);
-            ps.setLong(2, Instant.now().getEpochSecond());
-            ps.setLong(3, id);
-            ps.executeUpdate();
+    public void setNotes(long id, String notes) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET notes = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, notes);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, id);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    /** Set (or clear with null) a manual color tag like "RED"/"ORANGE"/"GREEN"/"BLUE". */
+    public void setColorTag(long id, String colorTag) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET color_tag = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, colorTag);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, id);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    public String getNotes(long id) throws SQLException {
+        synchronized (db) {
+            String sql = "SELECT notes FROM test_cases WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getString("notes") : null;
+                }
+            }
+        }
+    }
+
+    public void moveToFolder(long id, Long folderId) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET folder_id = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                if (folderId != null) ps.setLong(1, folderId); else ps.setNull(1, Types.INTEGER);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, id);
+                ps.executeUpdate();
+            }
         }
     }
 
     // ---- Delete --------------------------------------------------------
 
-    public synchronized void delete(long id) throws SQLException {
-        Connection conn = db.getConnection();
-        boolean prev = conn.getAutoCommit();
-        try {
-            conn.setAutoCommit(false);
-            // Cascade: results → baselines → test_case
-            exec(conn, "DELETE FROM results WHERE test_case_id = ?", id);
-            exec(conn, "DELETE FROM baselines WHERE test_case_id = ?", id);
-            exec(conn, "DELETE FROM test_cases WHERE id = ?", id);
-            conn.commit();
-        } catch (SQLException e) {
-            conn.rollback();
-            throw e;
-        } finally {
-            conn.setAutoCommit(prev);
+    public void delete(long id) throws SQLException {
+        synchronized (db) {
+            Connection conn = db.getConnection();
+            boolean prev = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                exec(conn, "DELETE FROM results WHERE test_case_id = ?", id);
+                exec(conn, "DELETE FROM baselines WHERE test_case_id = ?", id);
+                exec(conn, "DELETE FROM test_cases WHERE id = ?", id);
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(prev);
+            }
         }
     }
 
@@ -411,10 +440,8 @@ public class TestCaseRepository {
 
     private static String autoName(SaveRequest req) {
         String path = req.url();
-        // Strip query string
         int q = path.indexOf('?');
         if (q >= 0) path = path.substring(0, q);
-        // Use last segment
         int slash = path.lastIndexOf('/');
         if (slash >= 0 && slash < path.length() - 1) path = path.substring(slash + 1);
         return req.method() + " " + (path.isEmpty() ? "/" : path);

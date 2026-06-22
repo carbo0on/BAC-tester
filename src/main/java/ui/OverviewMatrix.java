@@ -24,14 +24,14 @@ import java.util.function.Consumer;
  */
 public class OverviewMatrix extends JPanel {
 
-    // Muted verdict colors (same as TestRunTab, for alpha-blending)
-    private static final Color POTENTIAL_BAC_BG   = new Color(0x7A, 0x1F, 0x1F, 200);
-    private static final Color LIKELY_ENFORCED_BG = new Color(0x1F, 0x5C, 0x1F, 200);
-    private static final Color EXPECTED_OK_BG     = new Color(0x55, 0x55, 0x55, 120);
-    private static final Color ANOMALY_BG         = new Color(0x7A, 0x4A, 0x00, 200);
-    private static final Color REVIEW_BG          = new Color(0x6A, 0x5C, 0x00, 200);
-    private static final Color SKIPPED_BG         = new Color(0x40, 0x40, 0x40, 80);
-    private static final Color ERROR_BG           = new Color(0x50, 0x00, 0x50, 200);
+    // Pastel verdict colors — same palette as TestRunTab
+    private static final Color POTENTIAL_BAC_BG   = new Color(255, 80,  80,  65);
+    private static final Color LIKELY_ENFORCED_BG = new Color(60,  200, 60,  55);
+    private static final Color EXPECTED_OK_BG     = new Color(150, 150, 150, 40);
+    private static final Color ANOMALY_BG         = new Color(255, 155, 40,  60);
+    private static final Color REVIEW_BG          = new Color(245, 215, 40,  60);
+    private static final Color SKIPPED_BG         = new Color(130, 130, 130, 35);
+    private static final Color ERROR_BG           = new Color(200, 60,  200, 55);
 
     private final RunRepository runRepo;
     private final MontoyaApi api;

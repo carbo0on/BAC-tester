@@ -185,7 +185,11 @@ public class ExportImportManager {
             final int dups = skipped;
             final String errMsg = errors.toString();
             SwingUtilities.invokeLater(() -> {
-                if (!errMsg.isEmpty()) {
+                if (errMsg.isEmpty()) {
+                    JOptionPane.showMessageDialog(parent,
+                        "Imported " + imported + " test case(s), skipped " + dups + " duplicate(s).",
+                        "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+                } else {
                     JOptionPane.showMessageDialog(parent,
                         "Imported " + imported + " test case(s), skipped " + dups + " duplicate(s)."
                             + "\n\nSome files had errors:" + errMsg,

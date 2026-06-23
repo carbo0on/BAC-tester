@@ -82,11 +82,18 @@ public class TestRunTab extends JPanel {
     private final DatabaseManager dbManager;
 
     // Config
-    private JComboBox<AccountItem> accountCombo;
+    private JList<AccountItem> accountList;          // multi-select: run one or more accounts
     private JComboBox<ScopeItem> scopeCombo;
     private JCheckBox safeModeCheck;
     private JButton runBtn;
     private JButton stopBtn;
+
+    // Sequential multi-account run queue
+    private final java.util.ArrayDeque<Long> accountQueue = new java.util.ArrayDeque<>();
+    private List<Long> queuedTcIds = new ArrayList<>();
+    private boolean queuedSafeMode;
+    private double  queuedThreshold;
+    private int     queueTotalAccounts;
 
     // Progress
     private JProgressBar progressBar;
@@ -153,10 +160,14 @@ public class TestRunTab extends JPanel {
         // Top row: account + scope + run/stop
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
 
-        top.add(new JLabel("Account:"));
-        accountCombo = new JComboBox<>();
-        accountCombo.setPreferredSize(new Dimension(200, 26));
-        top.add(accountCombo);
+        top.add(new JLabel("Accounts:"));
+        accountList = new JList<>(new DefaultListModel<>());
+        accountList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        accountList.setVisibleRowCount(3);
+        accountList.setToolTipText("Select one or more accounts — each is run in turn (Ctrl/Shift-click for multiple)");
+        JScrollPane accScroll = new JScrollPane(accountList);
+        accScroll.setPreferredSize(new Dimension(220, 62));
+        top.add(accScroll);
 
         top.add(new JLabel("Scope:"));
         scopeCombo = new JComboBox<>();
@@ -365,6 +376,15 @@ public class TestRunTab extends JPanel {
         colsBtn.setToolTipText("Show / hide columns and restore the default layout");
         searchBar.add(colsBtn);
 
+        JButton clearHistoryBtn = new JButton("🗑 Clear history");
+        clearHistoryBtn.setFont(clearHistoryBtn.getFont().deriveFont(11f));
+        clearHistoryBtn.setToolTipText("Remove all rows from this results view (kept across runs otherwise)");
+        clearHistoryBtn.addActionListener(e -> {
+            tableModel.clear();
+            resetVerdictCounts();
+        });
+        searchBar.add(clearHistoryBtn);
+
         JPanel northPanel = new JPanel(new BorderLayout());
         northPanel.add(filterBar, BorderLayout.NORTH);
         northPanel.add(searchBar, BorderLayout.SOUTH);
@@ -510,21 +530,27 @@ public class TestRunTab extends JPanel {
 
         engine.setOnFinished((runId, error) ->
             SwingUtilities.invokeLater(() -> {
-                runBtn.setEnabled(true);
-                stopBtn.setEnabled(false);
                 if (error != null) {
+                    // Abort the whole queue on a hard failure (e.g. canary).
+                    accountQueue.clear();
+                    runBtn.setEnabled(true);
+                    stopBtn.setEnabled(false);
                     statusLabel.setText("⚠ " + error);
                     statusLabel.setForeground(new Color(200, 60, 0));
                     JOptionPane.showMessageDialog(this, error,
                         "Run Failed", JOptionPane.WARNING_MESSAGE);
+                } else if (!accountQueue.isEmpty()) {
+                    // More accounts queued — keep going (history is preserved).
+                    if (overviewMatrix != null) overviewMatrix.refresh();
+                    runNextAccount();
                 } else {
-                    statusLabel.setText("✓ Done — run #" + runId);
+                    runBtn.setEnabled(true);
+                    stopBtn.setEnabled(false);
+                    statusLabel.setText(queueTotalAccounts > 1
+                        ? "✓ Done — " + queueTotalAccounts + " accounts"
+                        : "✓ Done — run #" + runId);
                     statusLabel.setForeground(new Color(0, 140, 0));
-                    // Auto-select the first result so its response shows immediately
-                    if (resultsTable.getRowCount() > 0) {
-                        resultsTable.setRowSelectionInterval(0, 0);
-                    }
-                    // Auto-refresh matrix in background
+                    if (resultsTable.getRowCount() > 0) resultsTable.setRowSelectionInterval(0, 0);
                     if (overviewMatrix != null) overviewMatrix.refresh();
                 }
             })
@@ -540,14 +566,14 @@ public class TestRunTab extends JPanel {
                 "Busy", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        prepareRunUI(tcIds.size());
-        engine.startRun(accountId, tcIds, safeModeCheck.isSelected(), readMatchThreshold());
+        startQueue(List.of(accountId), tcIds);
     }
 
     private void startRun() {
-        AccountItem acctItem = (AccountItem) accountCombo.getSelectedItem();
-        if (acctItem == null) {
-            JOptionPane.showMessageDialog(this, "Select an account first.", "No Account", JOptionPane.WARNING_MESSAGE);
+        List<AccountItem> selected = accountList.getSelectedValuesList();
+        if (selected.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Select one or more accounts first.",
+                "No Account", JOptionPane.WARNING_MESSAGE);
             return;
         }
         ScopeItem scopeItem = (ScopeItem) scopeCombo.getSelectedItem();
@@ -561,26 +587,57 @@ public class TestRunTab extends JPanel {
 
         boolean confirmBeforeRun = !"false".equalsIgnoreCase(readSetting("confirm_before_run"));
         if (confirmBeforeRun) {
+            String who = selected.size() == 1 ? "account \"" + selected.get(0).name + "\""
+                                              : selected.size() + " accounts";
             int confirm = JOptionPane.showConfirmDialog(this,
-                "Run " + ids.size() + " test case(s) as account \"" + acctItem.name + "\"?",
+                "Run " + ids.size() + " test case(s) as " + who + "?",
                 "Start Run", JOptionPane.OK_CANCEL_OPTION);
             if (confirm != JOptionPane.OK_OPTION) return;
         }
 
-        prepareRunUI(ids.size());
-        engine.startRun(acctItem.id, ids, safeModeCheck.isSelected(), readMatchThreshold());
+        List<Long> acctIds = selected.stream().map(a -> a.id).toList();
+        startQueue(acctIds, ids);
     }
 
-    private void prepareRunUI(int total) {
-        tableModel.clear();
-        resetVerdictCounts();
+    /** Queue one or more accounts to run sequentially over the same test cases. */
+    private void startQueue(List<Long> accountIds, List<Long> tcIds) {
+        if (engine.isRunning()) {
+            JOptionPane.showMessageDialog(this, "A run is already in progress.",
+                "Busy", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        accountQueue.clear();
+        accountQueue.addAll(accountIds);
+        queuedTcIds       = tcIds;
+        queuedSafeMode    = safeModeCheck.isSelected();
+        queuedThreshold   = readMatchThreshold();
+        queueTotalAccounts = accountIds.size();
+
+        // History is preserved across runs — do NOT clear the results table.
         runBtn.setEnabled(false);
         stopBtn.setEnabled(true);
+        runNextAccount();
+    }
+
+    /** Start the next queued account, or finish if the queue is empty. */
+    private void runNextAccount() {
+        Long accountId = accountQueue.poll();
+        if (accountId == null) {
+            runBtn.setEnabled(true);
+            stopBtn.setEnabled(false);
+            statusLabel.setText("✓ Done — all accounts");
+            statusLabel.setForeground(new Color(0, 140, 0));
+            if (resultsTable.getRowCount() > 0) resultsTable.setRowSelectionInterval(0, 0);
+            if (overviewMatrix != null) overviewMatrix.refresh();
+            return;
+        }
+        int idx = queueTotalAccounts - accountQueue.size(); // 1-based index of current account
         progressBar.setValue(0);
-        progressBar.setMaximum(total);
-        progressBar.setString("0 / " + total);
-        statusLabel.setText("Running…");
+        progressBar.setMaximum(queuedTcIds.size());
+        progressBar.setString("0 / " + queuedTcIds.size());
+        statusLabel.setText("Running account " + idx + " / " + queueTotalAccounts + "…");
         statusLabel.setForeground(UIManager.getColor("Label.foreground"));
+        engine.startRun(accountId, queuedTcIds, queuedSafeMode, queuedThreshold);
     }
 
     private double readMatchThreshold() {
@@ -605,19 +662,22 @@ public class TestRunTab extends JPanel {
             try {
                 List<AccountRepository.AccountRecord> accounts = accountRepo.getAll();
                 SwingUtilities.invokeLater(() -> {
-                    AccountItem selected = (AccountItem) accountCombo.getSelectedItem();
-                    accountCombo.removeAllItems();
-                    for (var a : accounts) {
-                        accountCombo.addItem(new AccountItem(a.id(), a.name(), a.label()));
-                    }
-                    // Restore selection
-                    if (selected != null) {
-                        for (int i = 0; i < accountCombo.getItemCount(); i++) {
-                            if (accountCombo.getItemAt(i).id == selected.id) {
-                                accountCombo.setSelectedIndex(i);
-                                break;
-                            }
-                        }
+                    // Preserve current selection by id
+                    java.util.Set<Long> selectedIds = new java.util.HashSet<>();
+                    for (AccountItem it : accountList.getSelectedValuesList()) selectedIds.add(it.id);
+
+                    DefaultListModel<AccountItem> model = new DefaultListModel<>();
+                    for (var a : accounts) model.addElement(new AccountItem(a.id(), a.name(), a.label()));
+                    accountList.setModel(model);
+
+                    java.util.List<Integer> restore = new ArrayList<>();
+                    for (int i = 0; i < model.size(); i++)
+                        if (selectedIds.contains(model.get(i).id)) restore.add(i);
+                    if (!restore.isEmpty()) {
+                        int[] idx = restore.stream().mapToInt(Integer::intValue).toArray();
+                        accountList.setSelectedIndices(idx);
+                    } else if (model.size() == 1) {
+                        accountList.setSelectedIndex(0);
                     }
                 });
             } catch (Exception e) {
@@ -695,9 +755,10 @@ public class TestRunTab extends JPanel {
 
         void addResult(RunRepository.ResultRecord r) {
             Row row = new Row(r);
-            allRows.add(row);
-            rows.add(row);
-            fireTableRowsInserted(rows.size() - 1, rows.size() - 1);
+            // Newest on top so repeated runs (incl. other accounts) stack above the old.
+            allRows.add(0, row);
+            rows.add(0, row);
+            fireTableRowsInserted(0, 0);
         }
 
         void clear() {

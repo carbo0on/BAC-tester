@@ -205,6 +205,16 @@ public class DatabaseManager {
                 )
             """);
 
+            // Folders for organising accounts (flat list; NULL folder = Uncategorized)
+            st.execute("""
+                CREATE TABLE IF NOT EXISTS account_folders (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name       TEXT NOT NULL,
+                    color      TEXT,
+                    created_at INTEGER
+                )
+            """);
+
             // Extension-wide key/value configuration store
             st.execute("""
                 CREATE TABLE IF NOT EXISTS settings (

@@ -28,6 +28,7 @@ public class AccountRepository {
         Map<String, String> headers,
         String expectedAccess,      // ALLOWED / DENIED / UNKNOWN
         Long canaryRequestId,
+        Long folderId,              // NULL = Uncategorized
         long createdAt,
         long updatedAt
     ) {
@@ -37,6 +38,8 @@ public class AccountRepository {
             return name + role;
         }
     }
+
+    public record AccountFolder(long id, String name, String color) {}
 
     // ---- Write ---------------------------------------------------------
 
@@ -115,7 +118,7 @@ public class AccountRepository {
         synchronized (db) {
             String sql = """
                 SELECT id, name, role_desc, auth_material, expected_access,
-                       canary_request_id, created_at, updated_at
+                       canary_request_id, folder_id, created_at, updated_at
                 FROM accounts ORDER BY name
                 """;
             List<AccountRecord> result = new ArrayList<>();
@@ -133,7 +136,7 @@ public class AccountRepository {
         synchronized (db) {
             String sql = """
                 SELECT id, name, role_desc, auth_material, expected_access,
-                       canary_request_id, created_at, updated_at
+                       canary_request_id, folder_id, created_at, updated_at
                 FROM accounts WHERE id=?
                 """;
             try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
@@ -143,6 +146,96 @@ public class AccountRepository {
                 }
             }
         }
+    }
+
+    public void moveToFolder(long accountId, Long folderId) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE accounts SET folder_id=?, updated_at=? WHERE id=?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                if (folderId != null) ps.setLong(1, folderId); else ps.setNull(1, Types.INTEGER);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, accountId);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    // ---- Account folders -----------------------------------------------
+
+    public long createFolder(String name) throws SQLException {
+        synchronized (db) {
+            String sql = "INSERT INTO account_folders (name, created_at) VALUES (?, ?)";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, name);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.executeUpdate();
+                try (ResultSet rs = ps.getGeneratedKeys()) { return rs.next() ? rs.getLong(1) : -1; }
+            }
+        }
+    }
+
+    public List<AccountFolder> getFolders() throws SQLException {
+        synchronized (db) {
+            String sql = "SELECT id, name, color FROM account_folders ORDER BY name";
+            List<AccountFolder> result = new ArrayList<>();
+            try (Statement st = db.getConnection().createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next())
+                    result.add(new AccountFolder(rs.getLong("id"), rs.getString("name"), rs.getString("color")));
+            }
+            return result;
+        }
+    }
+
+    public void renameFolder(long id, String name) throws SQLException {
+        synchronized (db) {
+            try (PreparedStatement ps = db.getConnection().prepareStatement(
+                    "UPDATE account_folders SET name=? WHERE id=?")) {
+                ps.setString(1, name); ps.setLong(2, id); ps.executeUpdate();
+            }
+        }
+    }
+
+    public void setFolderColor(long id, String color) throws SQLException {
+        synchronized (db) {
+            try (PreparedStatement ps = db.getConnection().prepareStatement(
+                    "UPDATE account_folders SET color=? WHERE id=?")) {
+                ps.setString(1, color); ps.setLong(2, id); ps.executeUpdate();
+            }
+        }
+    }
+
+    /** Deletes a folder and moves its accounts back to Uncategorized. */
+    public void deleteFolder(long id) throws SQLException {
+        synchronized (db) {
+            Connection conn = db.getConnection();
+            boolean prev = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE accounts SET folder_id=NULL WHERE folder_id=?")) {
+                    ps.setLong(1, id); ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM account_folders WHERE id=?")) {
+                    ps.setLong(1, id); ps.executeUpdate();
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback(); throw e;
+            } finally {
+                conn.setAutoCommit(prev);
+            }
+        }
+    }
+
+    /** Creates an account with an explicit folder (used by import). Returns new id. */
+    public long createInFolder(String name, String roleDesc,
+                               Map<String, String> cookies, Map<String, String> headers,
+                               String expectedAccess, Long folderId) throws SQLException {
+        long id = create(name, roleDesc, cookies, headers, expectedAccess);
+        if (folderId != null) moveToFolder(id, folderId);
+        return id;
     }
 
     // ---- Session extraction from an HTTP request -----------------------
@@ -220,6 +313,8 @@ public class AccountRepository {
 
         long crid = rs.getLong("canary_request_id");
         Long canaryId = rs.wasNull() ? null : crid;
+        long fid = rs.getLong("folder_id");
+        Long folderId = rs.wasNull() ? null : fid;
 
         return new AccountRecord(
             rs.getLong("id"),
@@ -229,6 +324,7 @@ public class AccountRepository {
             headers,
             rs.getString("expected_access"),
             canaryId,
+            folderId,
             rs.getLong("created_at"),
             rs.getLong("updated_at")
         );

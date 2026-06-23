@@ -93,8 +93,8 @@ public class OverviewMatrix extends JPanel {
         add(new JScrollPane(table), BorderLayout.CENTER);
 
         JLabel hint = new JLabel(
-            "<html><small>Click a cell to open it in Compare tab. "
-            + "Double-click a TC name to add to working set.</small></html>");
+            "Click a cell to open it in the Compare tab.");
+        hint.setFont(hint.getFont().deriveFont(Font.ITALIC, 11f));
         hint.setForeground(UIManager.getColor("Label.disabledForeground"));
         hint.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
         add(hint, BorderLayout.SOUTH);
@@ -222,11 +222,11 @@ public class OverviewMatrix extends JPanel {
             }
             RunRepository.MatrixCell cell = getCellData(row, col);
             if (cell == null) return "No result for this account";
-            return "<html><b>" + cell.testCaseName() + "</b><br>"
-                + "Account: " + cell.accountName() + "<br>"
-                + "Status: " + cell.newStatus() + "<br>"
-                + "Similarity: " + String.format("%.1f%%", cell.similarity()) + "<br>"
-                + "Verdict: " + verdictLabel(cell.verdict()) + "</html>";
+            return cell.testCaseName()
+                + "  ·  Account: " + cell.accountName()
+                + "  ·  Status: " + cell.newStatus()
+                + "  ·  Similarity: " + String.format("%.1f%%", cell.similarity())
+                + "  ·  Verdict: " + verdictLabel(cell.verdict());
         }
     }
 

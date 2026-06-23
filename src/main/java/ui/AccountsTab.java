@@ -6,10 +6,17 @@ import db.AccountRepository.AccountRecord;
 import db.TestCaseRepository;
 import db.TestCaseRepository.TestCaseRow;
 
+import com.google.gson.*;
+
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.tree.*;
 import java.awt.*;
+import java.awt.datatransfer.*;
 import java.awt.event.*;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -27,9 +34,18 @@ public class AccountsTab extends JPanel {
     private final AccountRepository accountRepo;
     private final TestCaseRepository tcRepo;
 
-    // Accounts list (left side)
-    private final DefaultListModel<AccountRecord> listModel = new DefaultListModel<>();
-    private final JList<AccountRecord> accountList;
+    // Accounts tree (left side): folders + account leaves
+    private final DefaultMutableTreeNode treeRoot = new DefaultMutableTreeNode("Accounts");
+    private final DefaultTreeModel treeModel = new DefaultTreeModel(treeRoot);
+    private final JTree accountTree = new JTree(treeModel);
+    private static final DataFlavor ACCT_FLAVOR = new DataFlavor(long[].class, "BAC account IDs");
+    static final String[] FOLDER_COLORS = {"RED", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE"};
+    private List<AccountRepository.AccountFolder> allFolders = new ArrayList<>();
+
+    /** id == null → Uncategorized, otherwise a real account-folder id. */
+    private record FolderNode(Long id, String name, String color) {
+        @Override public String toString() { return name; }
+    }
 
     // Editor fields (right side)
     private final JTextField nameField       = new JTextField(28);
@@ -64,13 +80,16 @@ public class AccountsTab extends JPanel {
         this.accountRepo = accountRepo;
         this.tcRepo = tcRepo;
 
-        accountList = new JList<>(listModel);
-        accountList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        accountList.setCellRenderer(new AccountListRenderer());
-        accountList.setFixedCellHeight(32);
+        accountTree.setRootVisible(false);
+        accountTree.setShowsRootHandles(true);
+        accountTree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
+        accountTree.setCellRenderer(new AccountTreeRenderer());
+        accountTree.setRowHeight(24);
+        setupTreeDragDrop();
 
         buildLayout();
         wireEvents();
+        wireTreeContextMenu();
         clearEditor();
         loadAccounts();
     }
@@ -108,15 +127,27 @@ public class AccountsTab extends JPanel {
 
         JLabel listTitle = bold("Accounts");
         leftPanel.add(listTitle, BorderLayout.NORTH);
-        leftPanel.add(new JScrollPane(accountList), BorderLayout.CENTER);
+        leftPanel.add(new JScrollPane(accountTree), BorderLayout.CENTER);
 
-        JPanel listButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        JButton newBtn = new JButton("+ New");
+        JPanel listButtons = new JPanel(new GridLayout(2, 1, 0, 4));
+        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JButton newBtn = new JButton("+ Account");
+        JButton folderBtn = new JButton("+ Folder");
         JButton delBtn = new JButton("Delete");
-        newBtn.addActionListener(e -> { accountList.clearSelection(); clearEditor(); });
+        newBtn.addActionListener(e -> { accountTree.clearSelection(); clearEditor(); });
+        folderBtn.addActionListener(e -> promptCreateFolder());
         delBtn.addActionListener(e -> deleteSelected());
-        listButtons.add(newBtn);
-        listButtons.add(delBtn);
+        row1.add(newBtn); row1.add(folderBtn); row1.add(delBtn);
+
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JButton exportBtn = new JButton("Export…");
+        JButton importBtn = new JButton("Import…");
+        exportBtn.addActionListener(e -> exportAccounts());
+        importBtn.addActionListener(e -> importAccounts());
+        row2.add(exportBtn); row2.add(importBtn);
+
+        listButtons.add(row1);
+        listButtons.add(row2);
         leftPanel.add(listButtons, BorderLayout.SOUTH);
 
         // --- Right panel: scrollable editor + fixed action bar ---
@@ -216,7 +247,8 @@ public class AccountsTab extends JPanel {
         p.add(canaryRow, fullRow);
 
         // Note
-        JLabel note = new JLabel("<html><small>The canary request is sent before each run to confirm the session is still valid.</small></html>");
+        JLabel note = new JLabel("The canary request is sent before each run to confirm the session is still valid.");
+        note.setFont(note.getFont().deriveFont(Font.ITALIC, 11f));
         fullRow.gridy = row++;
         p.add(note, fullRow);
 
@@ -265,10 +297,9 @@ public class AccountsTab extends JPanel {
     // ---- Events --------------------------------------------------------
 
     private void wireEvents() {
-        // List selection → populate editor
-        accountList.addListSelectionListener(e -> {
-            if (e.getValueIsAdjusting()) return;
-            AccountRecord sel = accountList.getSelectedValue();
+        // Tree selection → populate editor when an account leaf is selected
+        accountTree.addTreeSelectionListener(e -> {
+            AccountRecord sel = selectedAccount();
             if (sel != null) populateEditor(sel);
         });
 
@@ -277,7 +308,7 @@ public class AccountsTab extends JPanel {
 
         // Cancel
         cancelBtn.addActionListener(e -> {
-            AccountRecord sel = accountList.getSelectedValue();
+            AccountRecord sel = selectedAccount();
             if (sel != null) populateEditor(sel); else clearEditor();
         });
 
@@ -297,27 +328,45 @@ public class AccountsTab extends JPanel {
         bg.submit(() -> {
             try {
                 List<AccountRecord> accounts = accountRepo.getAll();
+                List<AccountRepository.AccountFolder> folders = accountRepo.getFolders();
                 List<TestCaseRow> tcs = tcRepo.getAll();
                 SwingUtilities.invokeLater(() -> {
                     allAccounts = accounts;
+                    allFolders = folders;
                     allTestCases = tcs;
-                    AccountRecord prev = accountList.getSelectedValue();
-                    listModel.clear();
-                    accounts.forEach(listModel::addElement);
-                    // Re-select previously selected account
-                    if (prev != null) {
-                        for (int i = 0; i < listModel.size(); i++) {
-                            if (listModel.get(i).id() == prev.id()) {
-                                accountList.setSelectedIndex(i);
-                                break;
-                            }
-                        }
-                    }
+                    AccountRecord prev = selectedAccount();
+                    rebuildTree(accounts, folders);
+                    if (prev != null) selectAccountById(prev.id());
                 });
             } catch (Exception ex) {
                 api.logging().logToError("[BAC] Load accounts failed: " + ex.getMessage());
             }
         });
+    }
+
+    private void rebuildTree(List<AccountRecord> accounts,
+                             List<AccountRepository.AccountFolder> folders) {
+        treeRoot.removeAllChildren();
+
+        // Folder id → node (plus a null-keyed "Uncategorized" node)
+        Map<Long, DefaultMutableTreeNode> folderNodes = new LinkedHashMap<>();
+        DefaultMutableTreeNode uncategorized =
+            new DefaultMutableTreeNode(new FolderNode(null, "Uncategorized", null));
+        treeRoot.add(uncategorized);
+        folderNodes.put(null, uncategorized);
+
+        for (var f : folders) {
+            DefaultMutableTreeNode n =
+                new DefaultMutableTreeNode(new FolderNode(f.id(), f.name(), f.color()));
+            folderNodes.put(f.id(), n);
+            treeRoot.add(n);
+        }
+        for (var a : accounts) {
+            DefaultMutableTreeNode parent = folderNodes.getOrDefault(a.folderId(), uncategorized);
+            parent.add(new DefaultMutableTreeNode(a));
+        }
+        treeModel.reload();
+        for (int i = 0; i < accountTree.getRowCount(); i++) accountTree.expandRow(i);
     }
 
     private void saveCurrentAccount() {
@@ -337,6 +386,8 @@ public class AccountsTab extends JPanel {
         Map<String, String> headers = tableToMap(headerModel);
         Long canaryId = selectedCanaryId;
         Long acctId = editingAccountId;
+        // New accounts inherit the currently selected folder (if any).
+        Long targetFolderId = (acctId == null) ? selectedFolderId() : null;
 
         bg.submit(() -> {
             try {
@@ -344,19 +395,19 @@ public class AccountsTab extends JPanel {
                 if (acctId == null) {
                     savedId = accountRepo.create(name, roleDesc, cookies, headers, expectedAccess);
                     if (canaryId != null) accountRepo.setCanary(savedId, canaryId);
+                    if (targetFolderId != null) accountRepo.moveToFolder(savedId, targetFolderId);
                 } else {
                     accountRepo.update(acctId, name, roleDesc, cookies, headers, expectedAccess);
                     accountRepo.setCanary(acctId, canaryId);
                     savedId = acctId;
                 }
                 List<AccountRecord> accounts = accountRepo.getAll();
+                List<AccountRepository.AccountFolder> folders = accountRepo.getFolders();
                 SwingUtilities.invokeLater(() -> {
                     allAccounts = accounts;
-                    listModel.clear();
-                    accounts.forEach(listModel::addElement);
-                    for (int i = 0; i < listModel.size(); i++) {
-                        if (listModel.get(i).id() == savedId) { accountList.setSelectedIndex(i); break; }
-                    }
+                    allFolders = folders;
+                    rebuildTree(accounts, folders);
+                    selectAccountById(savedId);
                     editorTitle.setText("Saved ✓  —  " + name);
                 });
             } catch (Exception ex) {
@@ -369,21 +420,26 @@ public class AccountsTab extends JPanel {
     }
 
     private void deleteSelected() {
-        AccountRecord sel = accountList.getSelectedValue();
-        if (sel == null) return;
-        int confirm = JOptionPane.showConfirmDialog(this,
-            "Delete account \"" + sel.name() + "\"?",
-            "Confirm", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        if (confirm != JOptionPane.YES_OPTION) return;
-        long id = sel.id();
-        bg.submit(() -> {
-            try {
-                accountRepo.delete(id);
-                SwingUtilities.invokeLater(() -> { clearEditor(); loadAccounts(); });
-            } catch (Exception ex) {
-                api.logging().logToError("[BAC] Delete account failed: " + ex.getMessage());
-            }
-        });
+        // Delete the selected account, or the selected folder (accounts move to Uncategorized).
+        AccountRecord acct = selectedAccount();
+        if (acct != null) {
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "Delete account \"" + acct.name() + "\"?",
+                "Confirm", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            long id = acct.id();
+            bg.submit(() -> {
+                try {
+                    accountRepo.delete(id);
+                    SwingUtilities.invokeLater(() -> { clearEditor(); loadAccounts(); });
+                } catch (Exception ex) {
+                    api.logging().logToError("[BAC] Delete account failed: " + ex.getMessage());
+                }
+            });
+            return;
+        }
+        FolderNode fn = selectedFolderNode();
+        if (fn != null && fn.id() != null) deleteFolder(fn);
     }
 
     private void selectCanary() {
@@ -493,23 +549,363 @@ public class AccountsTab extends JPanel {
         }
     }
 
-    // ---- Inner: list cell renderer ------------------------------------
+    // ---- Tree helpers --------------------------------------------------
 
-    private static class AccountListRenderer extends DefaultListCellRenderer {
-        @Override
-        public Component getListCellRendererComponent(JList<?> list, Object value,
-                int index, boolean selected, boolean focus) {
-            super.getListCellRendererComponent(list, value, index, selected, focus);
-            if (value instanceof AccountRecord a) {
-                String access = a.expectedAccess();
-                String badge = switch (access != null ? access : "UNKNOWN") {
-                    case "DENIED"  -> " [DENIED]";
-                    case "ALLOWED" -> " [ALLOWED]";
-                    default        -> "";
+    private AccountRecord selectedAccount() {
+        TreePath p = accountTree.getSelectionPath();
+        if (p == null) return null;
+        Object o = ((DefaultMutableTreeNode) p.getLastPathComponent()).getUserObject();
+        return o instanceof AccountRecord a ? a : null;
+    }
+
+    private FolderNode selectedFolderNode() {
+        TreePath p = accountTree.getSelectionPath();
+        if (p == null) return null;
+        DefaultMutableTreeNode node = (DefaultMutableTreeNode) p.getLastPathComponent();
+        Object o = node.getUserObject();
+        if (o instanceof FolderNode fn) return fn;
+        // If an account leaf is selected, treat its parent folder as context.
+        if (o instanceof AccountRecord) {
+            Object parent = ((DefaultMutableTreeNode) node.getParent()).getUserObject();
+            if (parent instanceof FolderNode fn) return fn;
+        }
+        return null;
+    }
+
+    /** Folder id implied by the current selection (folder node or an account's parent). */
+    private Long selectedFolderId() {
+        FolderNode fn = selectedFolderNode();
+        return fn != null ? fn.id() : null;
+    }
+
+    private void selectAccountById(long id) {
+        for (int i = 0; i < accountTree.getRowCount(); i++) {
+            TreePath path = accountTree.getPathForRow(i);
+            Object o = ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
+            if (o instanceof AccountRecord a && a.id() == id) {
+                accountTree.setSelectionPath(path);
+                accountTree.scrollPathToVisible(path);
+                return;
+            }
+        }
+    }
+
+    // ---- Folder operations ---------------------------------------------
+
+    private void promptCreateFolder() {
+        String name = JOptionPane.showInputDialog(this, "Folder name:", "New Account Folder",
+            JOptionPane.PLAIN_MESSAGE);
+        if (name == null || name.isBlank()) return;
+        bg.submit(() -> {
+            try { accountRepo.createFolder(name.trim()); SwingUtilities.invokeLater(this::loadAccounts); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Create account folder: " + ex.getMessage()); }
+        });
+    }
+
+    private void deleteFolder(FolderNode fn) {
+        if (fn.id() == null) return;
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "Delete folder \"" + fn.name() + "\"?\nAccounts inside move to Uncategorized.",
+            "Delete Folder", JOptionPane.YES_NO_OPTION);
+        if (confirm != JOptionPane.YES_OPTION) return;
+        long id = fn.id();
+        bg.submit(() -> {
+            try { accountRepo.deleteFolder(id); SwingUtilities.invokeLater(this::loadAccounts); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Delete account folder: " + ex.getMessage()); }
+        });
+    }
+
+    private void renameFolder(FolderNode fn) {
+        if (fn.id() == null) return;
+        String name = (String) JOptionPane.showInputDialog(this, "Rename folder:", "Rename",
+            JOptionPane.PLAIN_MESSAGE, null, null, fn.name());
+        if (name == null || name.isBlank()) return;
+        long id = fn.id();
+        bg.submit(() -> {
+            try { accountRepo.renameFolder(id, name.trim()); SwingUtilities.invokeLater(this::loadAccounts); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Rename account folder: " + ex.getMessage()); }
+        });
+    }
+
+    private void setFolderColor(FolderNode fn, String color) {
+        if (fn.id() == null) return;
+        long id = fn.id();
+        bg.submit(() -> {
+            try { accountRepo.setFolderColor(id, color); SwingUtilities.invokeLater(this::loadAccounts); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Set account folder color: " + ex.getMessage()); }
+        });
+    }
+
+    private void moveAccountToFolder(long accountId, Long folderId) {
+        bg.submit(() -> {
+            try { accountRepo.moveToFolder(accountId, folderId); SwingUtilities.invokeLater(this::loadAccounts); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Move account: " + ex.getMessage()); }
+        });
+    }
+
+    private void wireTreeContextMenu() {
+        accountTree.addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e)  { maybeShow(e); }
+            @Override public void mouseReleased(MouseEvent e) { maybeShow(e); }
+            private void maybeShow(MouseEvent e) {
+                if (!e.isPopupTrigger()) return;
+                TreePath path = accountTree.getPathForLocation(e.getX(), e.getY());
+                if (path != null) accountTree.setSelectionPath(path);
+
+                JPopupMenu popup = new JPopupMenu();
+                AccountRecord acct = selectedAccount();
+                FolderNode fn = selectedFolderNode();
+
+                if (acct != null) {
+                    JMenu moveMenu = new JMenu("Move to Folder");
+                    JMenuItem unc = new JMenuItem("Uncategorized");
+                    unc.addActionListener(a -> moveAccountToFolder(acct.id(), null));
+                    moveMenu.add(unc);
+                    for (var f : allFolders) {
+                        JMenuItem mi = new JMenuItem(f.name());
+                        mi.addActionListener(a -> moveAccountToFolder(acct.id(), f.id()));
+                        moveMenu.add(mi);
+                    }
+                    popup.add(moveMenu);
+                    JMenuItem del = new JMenuItem("Delete Account");
+                    del.addActionListener(a -> deleteSelected());
+                    popup.add(del);
+                    popup.addSeparator();
+                }
+
+                JMenuItem newFolder = new JMenuItem("New Folder");
+                newFolder.addActionListener(a -> promptCreateFolder());
+                popup.add(newFolder);
+
+                if (fn != null && fn.id() != null) {
+                    JMenuItem rename = new JMenuItem("Rename Folder");
+                    rename.addActionListener(a -> renameFolder(fn));
+                    popup.add(rename);
+
+                    JMenu colorMenu = new JMenu("Set Folder Color");
+                    for (String tag : FOLDER_COLORS) {
+                        JMenuItem ci = new JMenuItem(tag.charAt(0) + tag.substring(1).toLowerCase());
+                        ci.addActionListener(a -> setFolderColor(fn, tag));
+                        colorMenu.add(ci);
+                    }
+                    colorMenu.addSeparator();
+                    JMenuItem clear = new JMenuItem("Clear Color");
+                    clear.addActionListener(a -> setFolderColor(fn, null));
+                    colorMenu.add(clear);
+                    popup.add(colorMenu);
+
+                    JMenuItem delF = new JMenuItem("Delete Folder");
+                    delF.addActionListener(a -> deleteFolder(fn));
+                    popup.add(delF);
+                }
+                popup.show(accountTree, e.getX(), e.getY());
+            }
+        });
+    }
+
+    // ---- Drag-and-drop: move account leaves onto folder nodes ----------
+
+    private void setupTreeDragDrop() {
+        accountTree.setDragEnabled(true);
+        accountTree.setDropMode(DropMode.ON);
+        accountTree.setTransferHandler(new TransferHandler() {
+            @Override protected Transferable createTransferable(JComponent c) {
+                AccountRecord a = selectedAccount();
+                if (a == null) return null;
+                long[] ids = { a.id() };
+                return new Transferable() {
+                    @Override public DataFlavor[] getTransferDataFlavors() { return new DataFlavor[]{ACCT_FLAVOR}; }
+                    @Override public boolean isDataFlavorSupported(DataFlavor f) { return ACCT_FLAVOR.equals(f); }
+                    @Override public Object getTransferData(DataFlavor f) { return ids; }
                 };
-                setText(a.name() + badge);
+            }
+            @Override public int getSourceActions(JComponent c) { return MOVE; }
+            @Override public boolean canImport(TransferSupport s) {
+                return s.isDrop() && s.isDataFlavorSupported(ACCT_FLAVOR);
+            }
+            @Override public boolean importData(TransferSupport s) {
+                if (!s.isDrop()) return false;
+                JTree.DropLocation dl = (JTree.DropLocation) s.getDropLocation();
+                TreePath target = dl.getPath();
+                if (target == null) return false;
+                Object o = ((DefaultMutableTreeNode) target.getLastPathComponent()).getUserObject();
+                // Allow dropping on a folder node, or on an account (→ its parent folder).
+                Long folderId;
+                if (o instanceof FolderNode fn) folderId = fn.id();
+                else if (o instanceof AccountRecord) {
+                    Object parent = ((DefaultMutableTreeNode) ((DefaultMutableTreeNode)
+                        target.getLastPathComponent()).getParent()).getUserObject();
+                    folderId = (parent instanceof FolderNode pf) ? pf.id() : null;
+                } else return false;
+                try {
+                    long[] ids = (long[]) s.getTransferable().getTransferData(ACCT_FLAVOR);
+                    for (long id : ids) moveAccountToFolder(id, folderId);
+                    return true;
+                } catch (Exception ex) {
+                    api.logging().logToError("[BAC] Account DnD: " + ex.getMessage());
+                    return false;
+                }
+            }
+        });
+    }
+
+    // ---- Export / Import -----------------------------------------------
+
+    private void exportAccounts() {
+        int ok = JOptionPane.showConfirmDialog(this,
+            "Export includes auth material (cookies/tokens) in plain text.\nContinue?",
+            "Export Accounts", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.OK_OPTION) return;
+        JFileChooser fc = new JFileChooser();
+        fc.setSelectedFile(new File("accounts.bacaccounts.json"));
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File file = fc.getSelectedFile();
+        bg.submit(() -> {
+            try {
+                List<AccountRecord> accounts = accountRepo.getAll();
+                List<AccountRepository.AccountFolder> folders = accountRepo.getFolders();
+                JsonObject root = new JsonObject();
+                JsonArray fArr = new JsonArray();
+                for (var f : folders) {
+                    JsonObject fo = new JsonObject();
+                    fo.addProperty("id", f.id());
+                    fo.addProperty("name", f.name());
+                    if (f.color() != null) fo.addProperty("color", f.color());
+                    fArr.add(fo);
+                }
+                root.add("folders", fArr);
+                JsonArray aArr = new JsonArray();
+                for (var a : accounts) {
+                    JsonObject ao = new JsonObject();
+                    ao.addProperty("name", a.name());
+                    if (a.roleDesc() != null) ao.addProperty("role", a.roleDesc());
+                    ao.addProperty("expectedAccess", a.expectedAccess());
+                    if (a.folderId() != null) ao.addProperty("folderId", a.folderId());
+                    ao.add("cookies", mapToJson(a.cookies()));
+                    ao.add("headers", mapToJson(a.headers()));
+                    aArr.add(ao);
+                }
+                root.add("accounts", aArr);
+                String json = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(root);
+                Files.write(file.toPath(), json.getBytes(StandardCharsets.UTF_8));
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "Exported " + accounts.size() + " account(s).", "Export", JOptionPane.INFORMATION_MESSAGE));
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Export accounts failed: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "Export failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
+            }
+        });
+    }
+
+    private void importAccounts() {
+        JFileChooser fc = new JFileChooser();
+        fc.setMultiSelectionEnabled(true);
+        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File[] files = fc.getSelectedFiles();
+        bg.submit(() -> {
+            int imported = 0;
+            try {
+                for (File file : files) {
+                    String json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+                    JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+
+                    // Rebuild folders, remapping old ids → new ids by name.
+                    Map<Long, Long> folderIdMap = new HashMap<>();
+                    Map<String, Long> existingByName = new HashMap<>();
+                    for (var f : accountRepo.getFolders()) existingByName.put(f.name(), f.id());
+                    if (root.has("folders")) {
+                        for (JsonElement fe : root.getAsJsonArray("folders")) {
+                            JsonObject fo = fe.getAsJsonObject();
+                            String name = fo.get("name").getAsString();
+                            long newId = existingByName.containsKey(name)
+                                ? existingByName.get(name)
+                                : accountRepo.createFolder(name);
+                            existingByName.put(name, newId);
+                            if (fo.has("color"))
+                                accountRepo.setFolderColor(newId, fo.get("color").getAsString());
+                            if (fo.has("id")) folderIdMap.put(fo.get("id").getAsLong(), newId);
+                        }
+                    }
+                    if (root.has("accounts")) {
+                        for (JsonElement ae : root.getAsJsonArray("accounts")) {
+                            JsonObject ao = ae.getAsJsonObject();
+                            String name = ao.has("name") ? ao.get("name").getAsString() : "imported";
+                            String role = ao.has("role") ? ao.get("role").getAsString() : null;
+                            String access = ao.has("expectedAccess") ? ao.get("expectedAccess").getAsString() : "UNKNOWN";
+                            Long folderId = ao.has("folderId") ? folderIdMap.get(ao.get("folderId").getAsLong()) : null;
+                            Map<String, String> cookies = jsonToMap(ao.getAsJsonObject("cookies"));
+                            Map<String, String> headers = jsonToMap(ao.getAsJsonObject("headers"));
+                            accountRepo.createInFolder(name, role, cookies, headers, access, folderId);
+                            imported++;
+                        }
+                    }
+                }
+                final int n = imported;
+                SwingUtilities.invokeLater(() -> {
+                    loadAccounts();
+                    JOptionPane.showMessageDialog(this, "Imported " + n + " account(s).",
+                        "Import", JOptionPane.INFORMATION_MESSAGE);
+                });
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Import accounts failed: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "Import failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
+            }
+        });
+    }
+
+    private static JsonObject mapToJson(Map<String, String> map) {
+        JsonObject o = new JsonObject();
+        if (map != null) map.forEach(o::addProperty);
+        return o;
+    }
+
+    private static Map<String, String> jsonToMap(JsonObject o) {
+        Map<String, String> m = new LinkedHashMap<>();
+        if (o != null) for (var e : o.entrySet()) m.put(e.getKey(), e.getValue().getAsString());
+        return m;
+    }
+
+    // ---- Inner: tree cell renderer ------------------------------------
+
+    private static class AccountTreeRenderer extends DefaultTreeCellRenderer {
+        private static Color tagColor(String tag) {
+            if (tag == null) return null;
+            return switch (tag.toUpperCase()) {
+                case "RED"    -> new Color(0xE0, 0x6C, 0x6C);
+                case "ORANGE" -> new Color(0xE0, 0xA0, 0x55);
+                case "YELLOW" -> new Color(0xC9, 0xB8, 0x3A);
+                case "GREEN"  -> new Color(0x5F, 0xBF, 0x5F);
+                case "BLUE"   -> new Color(0x5F, 0x96, 0xE0);
+                case "PURPLE" -> new Color(0xB0, 0x7C, 0xE0);
+                default       -> null;
+            };
+        }
+
+        @Override
+        public Component getTreeCellRendererComponent(JTree tree, Object value,
+                boolean selected, boolean expanded, boolean leaf, int row, boolean focus) {
+            super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, focus);
+            Object o = (value instanceof DefaultMutableTreeNode n) ? n.getUserObject() : null;
+            if (o instanceof AccountRecord a) {
+                setText(a.id() + ":" + a.name());
+                setIcon(UIManager.getIcon("FileView.fileIcon"));
+                String access = a.expectedAccess() != null ? a.expectedAccess() : "UNKNOWN";
                 String role = a.roleDesc();
-                if (role != null && !role.isBlank()) setToolTipText(role);
+                StringBuilder tip = new StringBuilder();
+                tip.append("Account #").append(a.id()).append("  ·  ").append(a.name());
+                if (role != null && !role.isBlank()) tip.append("  ·  Role: ").append(role.trim());
+                tip.append("  ·  Expected access: ").append(access);
+                setToolTipText(tip.toString());
+            } else if (o instanceof FolderNode fn) {
+                setText(fn.name());
+                setIcon(UIManager.getIcon("FileView.directoryIcon"));
+                setToolTipText(null);
+                if (!selected) {
+                    Color c = tagColor(fn.color());
+                    if (c != null) setForeground(c);
+                }
             }
             return this;
         }

@@ -13,7 +13,7 @@ public class FolderRepository {
         this.db = db;
     }
 
-    public record FolderRecord(long id, String name, Long parentId, int sortOrder) {}
+    public record FolderRecord(long id, String name, Long parentId, int sortOrder, String color) {}
 
     public long createFolder(String name, Long parentId) throws SQLException {
         synchronized (db) {
@@ -32,7 +32,7 @@ public class FolderRepository {
 
     public List<FolderRecord> getAllFolders() throws SQLException {
         synchronized (db) {
-            String sql = "SELECT id, name, parent_id, sort_order FROM folders ORDER BY sort_order, name";
+            String sql = "SELECT id, name, parent_id, sort_order, color FROM folders ORDER BY sort_order, name";
             List<FolderRecord> result = new ArrayList<>();
             try (Statement st = db.getConnection().createStatement();
                  ResultSet rs = st.executeQuery(sql)) {
@@ -42,7 +42,8 @@ public class FolderRepository {
                         rs.getLong("id"),
                         rs.getString("name"),
                         rs.wasNull() ? null : pid,
-                        rs.getInt("sort_order")
+                        rs.getInt("sort_order"),
+                        rs.getString("color")
                     ));
                 }
             }
@@ -68,6 +69,18 @@ public class FolderRepository {
                 if (newParentId != null) ps.setLong(1, newParentId); else ps.setNull(1, Types.INTEGER);
                 ps.setInt(2, sortOrder);
                 ps.setLong(3, id);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    /** Set (or clear with null) a folder's color tag, e.g. "RED"/"GREEN"/"BLUE". */
+    public void setColor(long id, String color) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE folders SET color = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, color);
+                ps.setLong(2, id);
                 ps.executeUpdate();
             }
         }

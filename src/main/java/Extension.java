@@ -6,6 +6,7 @@ import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
 import burp.api.montoya.ui.hotkey.HotKey;
 import burp.api.montoya.ui.hotkey.HotKeyContext;
+import burp.api.montoya.ui.hotkey.HotKeyHandler;
 import capture.CaptureService;
 import db.AccountRepository;
 import db.DatabaseManager;
@@ -88,19 +89,51 @@ public class Extension implements BurpExtension {
             if (stored != null && !stored.isBlank()) hotkeyCombo = stored.trim();
         } catch (Exception ignored) {}
 
-        try {
-            api.userInterface().registerHotKeyHandler(
-                HotKeyContext.HTTP_MESSAGE_EDITOR,
-                HotKey.hotKey("BAC: Quick-save request", hotkeyCombo),
-                event -> event.messageEditorRequestResponse().ifPresent(editor ->
-                    capture.quickSaveToInbox(editor.requestResponse())
-                )
-            );
-            logging.logToOutput("[BAC] BAC Time-Machine loaded. Quick-save hotkey: " + hotkeyCombo);
-        } catch (Exception e) {
-            logging.logToError("[BAC] Could not register hotkey \"" + hotkeyCombo
-                + "\" (" + e.getMessage() + "). Set a valid combo in BAC Settings and reload.");
-            logging.logToOutput("[BAC] BAC Time-Machine loaded (hotkey not registered).");
+        // Shared handler: works whether focus is in a message editor (Repeater /
+        // Proxy intercept) or on a request table (Proxy history / Site map).
+        final String hk = hotkeyCombo;
+        HotKeyHandler quickSaveHandler = event -> {
+            logging.logToOutput("[BAC] Quick-save hotkey fired (" + hk + ").");
+            var editor = event.messageEditorRequestResponse();
+            if (editor.isPresent() && editor.get().requestResponse() != null
+                    && editor.get().requestResponse().request() != null) {
+                capture.quickSaveToInbox(editor.get().requestResponse());
+                return;
+            }
+            var selected = event.selectedRequestResponses();
+            if (selected != null && !selected.isEmpty()) {
+                selected.stream()
+                    .filter(rr -> rr != null && rr.request() != null)
+                    .forEach(capture::quickSaveToInbox);
+                return;
+            }
+            logging.logToOutput("[BAC] Quick-save hotkey: no request in focus to save.");
+        };
+
+        // Register for every context that exposes requests so the key works
+        // "anywhere" (Repeater, Proxy intercept, Proxy history, Site map).
+        HotKeyContext[] contexts = {
+            HotKeyContext.HTTP_MESSAGE_EDITOR,
+            HotKeyContext.PROXY_HTTP_HISTORY,
+            HotKeyContext.SITE_MAP_CONTENTS_TABLE
+        };
+        int registered = 0;
+        for (HotKeyContext ctx : contexts) {
+            try {
+                api.userInterface().registerHotKeyHandler(
+                    ctx, HotKey.hotKey("BAC: Quick-save request", hotkeyCombo), quickSaveHandler);
+                registered++;
+            } catch (Exception e) {
+                logging.logToError("[BAC] Could not register hotkey \"" + hotkeyCombo
+                    + "\" for context " + ctx + " (" + e.getMessage() + ").");
+            }
+        }
+        if (registered > 0) {
+            logging.logToOutput("[BAC] BAC Time-Machine loaded. Quick-save hotkey: "
+                + hotkeyCombo + " (registered in " + registered + " contexts).");
+        } else {
+            logging.logToError("[BAC] Hotkey \"" + hotkeyCombo
+                + "\" did not register in any context. Set a valid combo in BAC Settings and reload.");
         }
     }
 

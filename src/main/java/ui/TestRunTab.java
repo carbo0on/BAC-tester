@@ -162,7 +162,7 @@ public class TestRunTab extends JPanel {
         top.add(scopeCombo);
 
         safeModeCheck = new JCheckBox("Safe Mode", !"false".equalsIgnoreCase(readSetting("safe_mode")));
-        safeModeCheck.setToolTipText("Skip state-changing requests (POST/PUT/PATCH/DELETE)");
+        safeModeCheck.setToolTipText("Skip DELETE requests during runs (other methods are still replayed)");
         top.add(safeModeCheck);
 
         runBtn = new JButton("Run ▶");
@@ -497,6 +497,10 @@ public class TestRunTab extends JPanel {
                 } else {
                     statusLabel.setText("✓ Done — run #" + runId);
                     statusLabel.setForeground(new Color(0, 140, 0));
+                    // Auto-select the first result so its response shows immediately
+                    if (resultsTable.getRowCount() > 0) {
+                        resultsTable.setRowSelectionInterval(0, 0);
+                    }
                     // Auto-refresh matrix in background
                     if (overviewMatrix != null) overviewMatrix.refresh();
                 }

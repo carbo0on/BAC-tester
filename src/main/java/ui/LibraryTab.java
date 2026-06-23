@@ -2,6 +2,7 @@ package ui;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.HttpService;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.ui.editor.EditorOptions;
@@ -883,7 +884,8 @@ public class LibraryTab extends JPanel {
                     if (owner == null) { errors++; continue; }
                     byte[] reqRaw = tcRepo.getRequestRaw(tcId);
                     if (reqRaw == null) { errors++; continue; }
-                    HttpRequest req = buildOwnerRequest(reqRaw, owner);
+                    HttpService service = HttpService.httpService(tc.host(), tc.port(), tc.isHttps());
+                    HttpRequest req = buildOwnerRequest(reqRaw, owner, service);
                     if (req == null) { errors++; continue; }
                     var resp = api.http().sendRequest(req);
                     byte[] respRaw = resp.response().toByteArray().getBytes();
@@ -908,9 +910,11 @@ public class LibraryTab extends JPanel {
         });
     }
 
-    private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner) {
+    private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner, HttpService service) {
         try {
-            HttpRequest req = HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
+            HttpRequest req = service != null
+                ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
+                : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
             for (String h : new String[]{"Cookie","Authorization","X-Auth-Token","X-Session-Token","X-Access-Token","X-Api-Key"})
                 req = req.withRemovedHeader(h);
             Map<String, String> cookies = owner.cookies();

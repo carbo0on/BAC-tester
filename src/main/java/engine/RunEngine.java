@@ -134,9 +134,13 @@ public class RunEngine {
     private boolean checkCanary(AccountRepository.AccountRecord account) {
         if (account.canaryRequestId() == null) return true; // no canary configured → assume ok
         try {
-            byte[] raw = tcRepo.getRequestRaw(account.canaryRequestId());
+            long canaryId = account.canaryRequestId();
+            byte[] raw = tcRepo.getRequestRaw(canaryId);
             if (raw == null) return true;
-            HttpRequest req = buildSwappedRequest(raw, account);
+            TestCaseRepository.TestCaseRow canaryTc = tcRepo.getById(canaryId).orElse(null);
+            if (canaryTc == null) return true;
+            HttpService service = HttpService.httpService(canaryTc.host(), canaryTc.port(), canaryTc.isHttps());
+            HttpRequest req = buildSwappedRequest(raw, account, service);
             if (req == null) return true;
             var resp = api.http().sendRequest(req);
             int status = resp.response().statusCode();
@@ -156,8 +160,9 @@ public class RunEngine {
         TestCaseRepository.TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
         if (tc == null) return;
 
-        // Safe mode: skip state-changing requests
-        if (safeMode && tc.isStateChanging()) {
+        // Safe mode: skip DELETE requests only (the most destructive verb).
+        // POST/PUT/PATCH are still replayed so access control on them can be tested.
+        if (safeMode && "DELETE".equalsIgnoreCase(tc.method())) {
             String expAccess = account.expectedAccess() != null ? account.expectedAccess() : "UNKNOWN";
             saveSkipped(runId, tc, account, expAccess);
             return;
@@ -186,7 +191,8 @@ public class RunEngine {
                 api.logging().logToOutput("[BAC] Warning: " + tc.url() + " is out of scope. Proceeding anyway.");
             }
 
-            HttpRequest req = buildSwappedRequest(requestRaw, account);
+            HttpService service = HttpService.httpService(tc.host(), tc.port(), tc.isHttps());
+            HttpRequest req = buildSwappedRequest(requestRaw, account, service);
             if (req == null) {
                 saveResult(runId, tc, account, baselineId > 0 ? baselineId : null,
                            0, 0, "", new byte[0], 0.0, ERROR);
@@ -227,9 +233,15 @@ public class RunEngine {
      * Reconstruct request from raw bytes with new auth material injected.
      * Removes existing Cookie and Authorization headers, injects from account.
      */
-    private HttpRequest buildSwappedRequest(byte[] rawRequest, AccountRepository.AccountRecord account) {
+    private HttpRequest buildSwappedRequest(byte[] rawRequest, AccountRepository.AccountRecord account,
+                                            HttpService service) {
         try {
-            HttpRequest req = HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
+            // Bind the request to its target service (host/port/TLS). Without this the
+            // request has no destination and sendRequest fails with an empty response —
+            // which is why responses never appeared for HTTPS targets.
+            HttpRequest req = service != null
+                ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
+                : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
 
             // Remove auth headers
             req = req.withRemovedHeader("Cookie");

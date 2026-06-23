@@ -87,7 +87,7 @@ public class SettingsTab extends JPanel {
         form.add(sectionTitle("Run Safety"));
 
         safeModeCheck = new JCheckBox(
-            "Safe Mode — skip state-changing requests (POST / PUT / PATCH / DELETE) during runs");
+            "Safe Mode — skip DELETE requests during runs (POST / PUT / PATCH are still replayed)");
         safeModeCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(safeModeCheck);
 

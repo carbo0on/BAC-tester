@@ -76,12 +76,13 @@ public class DatabaseManager {
         addColumnIfMissing("test_cases", "color_tag", "TEXT");
         // notes already exists in the base schema, but guard for very old DBs
         addColumnIfMissing("test_cases", "notes", "TEXT");
-        // Migrate the old default quick-save hotkey to the new Alt+Win default.
-        // Only rewrite the previous default so a user's custom combo is preserved.
+        // Migrate previous default quick-save hotkeys to the current Alt+Q default.
+        // Only rewrite known former defaults so a user's custom combo is preserved.
         try (PreparedStatement ps = connection.prepareStatement(
-                "UPDATE settings SET value = 'Alt+Meta' WHERE key = 'hotkey_combo' AND value = 'Ctrl+Alt+A'")) {
+                "UPDATE settings SET value = 'Alt+Q' WHERE key = 'hotkey_combo' "
+                + "AND value IN ('Ctrl+Alt+A', 'Alt+Meta')")) {
             int n = ps.executeUpdate();
-            if (n > 0) logging.logToOutput("[BAC] Migration: quick-save hotkey default updated to Alt+Meta");
+            if (n > 0) logging.logToOutput("[BAC] Migration: quick-save hotkey default updated to Alt+Q");
         }
     }
 
@@ -221,7 +222,7 @@ public class DatabaseManager {
                 {"ignore_patterns",  "[\"\\\\d{10,13}\",\"csrf[_-]?token=[^&\\\\s]+\",\"nonce=[^&\\\\s]+\"]"},
                 {"safe_mode",        "true"},
                 {"font_size",        "12"},
-                {"hotkey_combo",     "Alt+Meta"},   // Alt + Windows/Meta key
+                {"hotkey_combo",     "Alt+Q"},   // quick-save (configurable in Settings)
                 // Phase 7.1 additions
                 {"coloring_mode",    "AUTO"},   // AUTO (by method) / MANUAL / OFF
                 {"review_lower_bound", "60"},    // grey-zone lower bound for REVIEW verdict

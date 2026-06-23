@@ -106,8 +106,8 @@ public class SettingsTab extends JPanel {
         hotkeyField = new JTextField(14);
         form.add(row("Quick-save hotkey:", hotkeyField,
             "Combo used to quick-save the focused request to Inbox. Same format as Burp's "
-            + "Settings (e.g. Alt+Meta for Alt+Windows, or Ctrl+Alt+A). Takes effect after "
-            + "you reload the extension."));
+            + "Settings (e.g. Alt+Q or Ctrl+Alt+A). Use modifiers plus a normal key; avoid the "
+            + "Windows/Meta key (the OS reserves it). Takes effect after you reload the extension."));
         JLabel hotkeyHint = new JLabel("<html><small>Changing the hotkey requires reloading the "
             + "extension (Extensions ▸ toggle the Loaded checkbox).</small></html>");
         hotkeyHint.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -283,7 +283,7 @@ public class SettingsTab extends JPanel {
                             if (list != null) list.forEach(patternModel::addElement);
                         } catch (Exception ignored) {}
                     }
-                    hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Alt+Meta");
+                    hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Alt+Q");
                     if (dbPath != null) dbPathLabel.setText(dbPath);
                     else dbPathLabel.setText(api.persistence().preferences().getString("bac_db_path"));
                 });
@@ -316,8 +316,8 @@ public class SettingsTab extends JPanel {
         boolean autoExpand = autoExpandCheck.isSelected();
         boolean confirmRun = confirmRunCheck.isSelected();
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
-        String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Alt+Meta";
-        final String hotkeyToSave = hotkeyRaw.isBlank() ? "Alt+Meta" : hotkeyRaw;
+        String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Alt+Q";
+        final String hotkeyToSave = hotkeyRaw.isBlank() ? "Alt+Q" : hotkeyRaw;
         List<String> patterns = new ArrayList<>();
         for (int i = 0; i < patternModel.size(); i++) patterns.add(patternModel.get(i));
         String patternsJson = gson.toJson(patterns);

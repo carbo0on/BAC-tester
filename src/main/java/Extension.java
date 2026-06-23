@@ -78,11 +78,11 @@ public class Extension implements BurpExtension {
                                        new FolderRepository(dbManager)));
 
         // --- 6. Hotkey: quick-save to Inbox (configurable in Settings) ---
-        // Default is Alt+Meta (Alt + Windows key). The combo is read from the
-        // settings table so users can rebind it; changing it takes effect after
-        // the extension is reloaded. Registration is wrapped so an unsupported
-        // combo only logs a warning instead of aborting extension load.
-        String hotkeyCombo = "Alt+Meta";
+        // Default is Alt+Q. The combo is read from the settings table so users
+        // can rebind it; changing it takes effect after the extension is
+        // reloaded. Registration is wrapped so an unsupported combo only logs a
+        // warning instead of aborting extension load.
+        String hotkeyCombo = "Alt+Q";
         try {
             String stored = dbManager.getSetting("hotkey_combo");
             if (stored != null && !stored.isBlank()) hotkeyCombo = stored.trim();

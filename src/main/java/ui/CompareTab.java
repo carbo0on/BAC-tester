@@ -387,12 +387,17 @@ public class CompareTab extends JPanel {
 
     private JPanel buildPlaceholder() {
         JPanel p = new JPanel(new GridBagLayout());
-        JLabel l = new JLabel("<html><center>No test cases loaded.<br>"
-            + "<small>Select test cases in Library → Add to Working Set,<br>"
-            + "or right-click a result in Test Run → Open in Compare.</small></center></html>");
-        l.setHorizontalAlignment(SwingConstants.CENTER);
-        l.setForeground(UIManager.getColor("Label.disabledForeground"));
-        p.add(l);
+        Box box = Box.createVerticalBox();
+        for (String line : new String[]{
+                "No test cases loaded.",
+                "Select test cases in Library → Add to Working Set,",
+                "or right-click a result in Test Run → Open in Compare."}) {
+            JLabel l = new JLabel(line);
+            l.setAlignmentX(Component.CENTER_ALIGNMENT);
+            l.setForeground(UIManager.getColor("Label.disabledForeground"));
+            box.add(l);
+        }
+        p.add(box);
         api.userInterface().applyThemeToComponent(p);
         return p;
     }

@@ -216,7 +216,8 @@ public class AccountsTab extends JPanel {
         p.add(canaryRow, fullRow);
 
         // Note
-        JLabel note = new JLabel("<html><small>The canary request is sent before each run to confirm the session is still valid.</small></html>");
+        JLabel note = new JLabel("The canary request is sent before each run to confirm the session is still valid.");
+        note.setFont(note.getFont().deriveFont(Font.ITALIC, 11f));
         fullRow.gridy = row++;
         p.add(note, fullRow);
 

@@ -108,8 +108,9 @@ public class SettingsTab extends JPanel {
             "Combo used to quick-save the focused request to Inbox. Same format as Burp's "
             + "Settings (e.g. Alt+Q or Ctrl+Alt+A). Use modifiers plus a normal key; avoid the "
             + "Windows/Meta key (the OS reserves it). Takes effect after you reload the extension."));
-        JLabel hotkeyHint = new JLabel("<html><small>Changing the hotkey requires reloading the "
-            + "extension (Extensions ▸ toggle the Loaded checkbox).</small></html>");
+        JLabel hotkeyHint = new JLabel("Changing the hotkey requires reloading the "
+            + "extension (Extensions ▸ toggle the Loaded checkbox).");
+        hotkeyHint.setFont(hotkeyHint.getFont().deriveFont(Font.ITALIC, 11f));
         hotkeyHint.setAlignmentX(Component.LEFT_ALIGNMENT);
         form.add(hotkeyHint);
 
@@ -212,13 +213,15 @@ public class SettingsTab extends JPanel {
 
         // ── Export / Import ──────────────────────────────────────────────
         form.add(sectionTitle("Library Export / Import"));
-        JLabel ioHint = new JLabel("<html><small>"
-            + "Export saves folders + test cases + all versioned baselines to a portable .bac.json bundle.<br>"
-            + "Import reads one or more .bac.json files, rebuilds the folder tree, and merges test cases<br>"
-            + "(deduplicates by host + method + URL + request hash — old baselines are never deleted)."
-            + "</small></html>");
-        ioHint.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(ioHint);
+        for (String line : new String[]{
+                "Export saves folders + test cases + all versioned baselines to a portable .bac.json bundle.",
+                "Import reads one or more .bac.json files, rebuilds the folder tree, and merges test cases",
+                "(deduplicates by host + method + URL + request hash — old baselines are never deleted)."}) {
+            JLabel ioHint = new JLabel(line);
+            ioHint.setFont(ioHint.getFont().deriveFont(Font.ITALIC, 11f));
+            ioHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+            form.add(ioHint);
+        }
         form.add(gap(6));
 
         dedupCheck = new JCheckBox("Skip duplicates on import (host + method + URL + request hash)");

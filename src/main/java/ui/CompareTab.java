@@ -2,6 +2,9 @@ package ui;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.ui.editor.EditorOptions;
+import burp.api.montoya.ui.editor.HttpResponseEditor;
 import db.*;
 import engine.DiffUtil;
 import engine.RunEngine;
@@ -43,16 +46,8 @@ public class CompareTab extends JPanel {
     private final List<ResponseEntry> responses = new ArrayList<>();
     private int leftIdx  = 0;
     private int rightIdx = 0;
-    private boolean leftFocused = true;
-    private boolean syncScrollLock = false;
-    private boolean normalizedMode = false;
-    private List<Pattern> ignorePatterns = new ArrayList<>();
     private long currentResultId = -1; // id of the result currently in the RIGHT pane (for review)
     private boolean currentReviewed = false;
-
-    // Diff navigation: visual line indices (in the rendered pane) where diffs start
-    private final List<Integer> diffPositions = new ArrayList<>();
-    private int diffNavIdx = 0;
 
     // ---- UI -----------------------------------------------------------
 
@@ -61,10 +56,9 @@ public class CompareTab extends JPanel {
     private JLabel tcNameLabel;
     private JComboBox<ResponseEntry> leftCombo, rightCombo;
     private JLabel summaryLabel;
+    private JLabel leftTitle, rightTitle;
     private JPanel sessionChipsPanel;
-    private JTextPane leftPane, rightPane;
-    private JScrollPane leftScroll, rightScroll;
-    private JLabel diffCountLabel;
+    private HttpResponseEditor leftEditor, rightEditor;  // Burp-native: syntax coloring + right-click
     private JButton reviewedBtn;
     private JTextField noteField;
 
@@ -113,7 +107,6 @@ public class CompareTab extends JPanel {
         viewArea = buildPlaceholder();
         add(viewArea, BorderLayout.CENTER);
 
-        loadIgnorePatterns();
         api.userInterface().applyThemeToComponent(this);
     }
 
@@ -254,7 +247,6 @@ public class CompareTab extends JPanel {
         currentReviewed = false;
         if (currentResultId > 0) {
             try {
-                // quick check
                 synchronized (dbManager) {
                     String sql = "SELECT reviewed FROM results WHERE id = ?";
                     try (PreparedStatement ps = dbManager.getConnection().prepareStatement(sql)) {
@@ -267,110 +259,25 @@ public class CompareTab extends JPanel {
             } catch (Exception ignored) {}
         }
 
-        DiffUtil.SideBySideDiff diff;
-        if (normalizedMode) {
-            String[] leftLines  = applyIgnore(leftRaw);
-            String[] rightLines = applyIgnore(rightRaw);
-            diff = DiffUtil.computeText(
-                String.join("\n", leftLines),
-                String.join("\n", rightLines));
-        } else {
-            diff = DiffUtil.compute(leftRaw, rightRaw);
-        }
+        // Show each response in a Burp-native read-only editor (syntax coloring,
+        // search, and the full right-click context menu).
+        setEditorResponse(leftEditor,  leftRaw);
+        setEditorResponse(rightEditor, rightRaw);
+        if (leftTitle  != null) leftTitle.setText("OLD: "  + left.label());
+        if (rightTitle != null) rightTitle.setText("NEW: " + right.label());
 
+        // Similarity for the summary still comes from the line diff.
+        DiffUtil.SideBySideDiff diff = DiffUtil.compute(leftRaw, rightRaw);
         updateSummary(left, right, diff);
-        buildDiffPositions(diff.left());
-        renderPane(leftPane,  diff.left(),  OLD_BG);
-        renderPane(rightPane, diff.right(), NEW_BG);
 
         reviewedBtn.setEnabled(currentResultId > 0);
         reviewedBtn.setText(currentReviewed ? "✓ Reviewed" : "Mark Reviewed");
     }
 
-    private String[] applyIgnore(byte[] raw) {
-        String text = new String(raw, java.nio.charset.StandardCharsets.UTF_8)
-            .replace("\r\n", "\n");
-        if (text.length() > 300_000) text = text.substring(0, 300_000);
-        String[] lines = text.split("\n", -1);
-        return DiffUtil.applyIgnorePatterns(lines, ignorePatterns);
-    }
-
-    private void renderPane(JTextPane pane, List<DiffUtil.DiffLine> lines, Color changedBg) {
-        Font mono = api.userInterface().currentEditorFont();
-        if (mono == null) mono = new Font("Monospaced", Font.PLAIN, 12);
-
-        DefaultStyledDocument doc = new DefaultStyledDocument();
-        Style base = doc.addStyle("base", null);
-        StyleConstants.setFontFamily(base, mono.getFamily());
-        StyleConstants.setFontSize(base, mono.getSize());
-
-        Color tableBg = pane.getBackground();
-        Color blendedOld = blend(OLD_BG, tableBg);
-        Color blendedNew = blend(NEW_BG, tableBg);
-
-        for (DiffUtil.DiffLine dl : lines) {
-            boolean isIgnored = normalizedMode && DiffUtil.isIgnored(dl.content());
-            String displayLine = isIgnored
-                ? DiffUtil.stripIgnoredPrefix(dl.content())
-                : dl.content();
-
-            Style s = doc.addStyle(null, base);
-            if (dl.type() == DiffUtil.LineType.OLD_ONLY) {
-                StyleConstants.setBackground(s, blendedOld);
-            } else if (dl.type() == DiffUtil.LineType.NEW_ONLY) {
-                StyleConstants.setBackground(s, changedBg == OLD_BG ? blendedOld : blendedNew);
-            } else if (dl.isBlank()) {
-                Color blankBg = new Color(tableBg.getRed(), tableBg.getGreen(), tableBg.getBlue(),
-                    tableBg instanceof Color bc ? bc.getAlpha() : 255);
-                StyleConstants.setBackground(s, new Color(
-                    Math.max(0, tableBg.getRed()   - 8),
-                    Math.max(0, tableBg.getGreen() - 8),
-                    Math.max(0, tableBg.getBlue()  - 8)));
-            }
-            if (isIgnored) {
-                StyleConstants.setForeground(s, IGN_FG);
-                StyleConstants.setStrikeThrough(s, true);
-            }
-
-            try {
-                doc.insertString(doc.getLength(), displayLine + "\n", s);
-            } catch (BadLocationException ignored) {}
-        }
-
-        pane.setDocument(doc);
-        pane.setCaretPosition(0);
-    }
-
-    private void buildDiffPositions(List<DiffUtil.DiffLine> leftLines) {
-        diffPositions.clear();
-        for (int i = 0; i < leftLines.size(); i++) {
-            if (leftLines.get(i).isChanged()) {
-                // Add only the start of each changed block
-                if (diffPositions.isEmpty() || diffPositions.get(diffPositions.size() - 1) < i - 1) {
-                    diffPositions.add(i);
-                }
-            }
-        }
-        diffNavIdx = 0;
-        diffCountLabel.setText(diffPositions.isEmpty() ? "No diffs" : "0/" + diffPositions.size() + " diffs");
-    }
-
-    private void jumpToDiff(boolean forward) {
-        if (diffPositions.isEmpty()) return;
-        diffNavIdx = forward
-            ? (diffNavIdx + 1) % diffPositions.size()
-            : (diffNavIdx - 1 + diffPositions.size()) % diffPositions.size();
-        diffCountLabel.setText((diffNavIdx + 1) + "/" + diffPositions.size() + " diffs");
-        scrollToLine(diffPositions.get(diffNavIdx));
-    }
-
-    private void scrollToLine(int lineIndex) {
+    private void setEditorResponse(HttpResponseEditor editor, byte[] raw) {
         try {
-            int pos = leftPane.getDocument().getDefaultRootElement()
-                .getElement(Math.min(lineIndex, leftPane.getDocument().getDefaultRootElement().getElementCount() - 1))
-                .getStartOffset();
-            Rectangle r = leftPane.modelToView2D(pos).getBounds();
-            leftPane.scrollRectToVisible(r);
+            editor.setResponse(HttpResponse.httpResponse(
+                ByteArray.byteArray(raw != null && raw.length > 0 ? raw : new byte[0])));
         } catch (Exception ignored) {}
     }
 
@@ -485,65 +392,38 @@ public class CompareTab extends JPanel {
     }
 
     private JSplitPane buildEditorPanel() {
-        Font mono = api.userInterface().currentEditorFont();
-        if (mono == null) mono = new Font("Monospaced", Font.PLAIN, 12);
+        leftEditor  = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+        rightEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
 
-        leftPane  = createTextPane(mono);
-        rightPane = createTextPane(mono);
+        leftTitle  = paneTitle("OLD");
+        rightTitle = paneTitle("NEW");
 
-        leftScroll  = new JScrollPane(leftPane);
-        rightScroll = new JScrollPane(rightPane);
+        JPanel leftWrap  = new JPanel(new BorderLayout());
+        leftWrap.add(leftTitle, BorderLayout.NORTH);
+        leftWrap.add(leftEditor.uiComponent(), BorderLayout.CENTER);
 
-        configureFocusBorder(leftPane, rightPane, true);
-        configureFocusBorder(rightPane, leftPane, false);
+        JPanel rightWrap = new JPanel(new BorderLayout());
+        rightWrap.add(rightTitle, BorderLayout.NORTH);
+        rightWrap.add(rightEditor.uiComponent(), BorderLayout.CENTER);
 
-        wireScrollSync();
-        wireKeyboardNavigation();
-
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftScroll, rightScroll);
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftWrap, rightWrap);
         split.setResizeWeight(0.5);
         split.setDividerSize(4);
+        split.setContinuousLayout(true);
         api.userInterface().applyThemeToComponent(split);
         return split;
     }
 
-    private JTextPane createTextPane(Font mono) {
-        JTextPane pane = new JTextPane();
-        pane.setFont(mono);
-        pane.setEditable(false);
-        pane.setCaret(new DefaultCaret() {
-            @Override public void setSelectionVisible(boolean v) { super.setSelectionVisible(v); }
-        });
-        api.userInterface().applyThemeToComponent(pane);
-        return pane;
-    }
-
-    private void configureFocusBorder(JTextPane pane, JTextPane other, boolean isLeft) {
-        pane.addFocusListener(new FocusAdapter() {
-            @Override public void focusGained(FocusEvent e) {
-                leftFocused = isLeft;
-                pane.setBorder(BorderFactory.createLineBorder(new Color(80, 130, 200), 1));
-                other.setBorder(null);
-            }
-            @Override public void focusLost(FocusEvent e) { pane.setBorder(null); }
-        });
+    private JLabel paneTitle(String text) {
+        JLabel l = new JLabel(text);
+        l.setFont(l.getFont().deriveFont(Font.BOLD, 11f));
+        l.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+        return l;
     }
 
     private JPanel buildToolBar() {
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         bar.setBorder(BorderFactory.createEmptyBorder(2, 8, 4, 8));
-
-        // Diff navigation
-        JButton prevDiff = new JButton("‹ Prev diff");
-        diffCountLabel = new JLabel("No diffs");
-        JButton nextDiff = new JButton("Next diff ›");
-        prevDiff.addActionListener(e -> jumpToDiff(false));
-        nextDiff.addActionListener(e -> jumpToDiff(true));
-
-        bar.add(prevDiff);
-        bar.add(diffCountLabel);
-        bar.add(nextDiff);
-        bar.add(new JSeparator(JSeparator.VERTICAL));
 
         // Swap sides
         JButton swapBtn = new JButton("⇄ Swap");
@@ -555,23 +435,11 @@ public class CompareTab extends JPanel {
         });
         bar.add(swapBtn);
 
-        // Send to Burp Comparer
-        JButton comparerBtn = new JButton("📋 Comparer");
-        comparerBtn.setToolTipText("Send both responses to Burp Comparer");
+        // Send to Burp Comparer (for a full word-level diff)
+        JButton comparerBtn = new JButton("📋 Send to Comparer");
+        comparerBtn.setToolTipText("Send both responses to Burp Comparer for a detailed diff");
         comparerBtn.addActionListener(e -> sendToComparer());
         bar.add(comparerBtn);
-
-        bar.add(new JSeparator(JSeparator.VERTICAL));
-
-        // Normalized toggle
-        JToggleButton normBtn = new JToggleButton("Raw");
-        normBtn.setToolTipText("Toggle normalized view (grey-out ignored patterns)");
-        normBtn.addActionListener(e -> {
-            normalizedMode = normBtn.isSelected();
-            normBtn.setText(normalizedMode ? "Normalized" : "Raw");
-            renderPanes();
-        });
-        bar.add(normBtn);
 
         bar.add(new JSeparator(JSeparator.VERTICAL));
 
@@ -633,59 +501,6 @@ public class CompareTab extends JPanel {
         }
         sessionChipsPanel.revalidate();
         sessionChipsPanel.repaint();
-    }
-
-    // ---- Scroll sync --------------------------------------------------
-
-    private void wireScrollSync() {
-        BoundedRangeModel lm = leftScroll.getVerticalScrollBar().getModel();
-        BoundedRangeModel rm = rightScroll.getVerticalScrollBar().getModel();
-
-        lm.addChangeListener(e -> {
-            if (!syncScrollLock) {
-                syncScrollLock = true;
-                rm.setValue(lm.getValue());
-                syncScrollLock = false;
-            }
-        });
-        rm.addChangeListener(e -> {
-            if (!syncScrollLock) {
-                syncScrollLock = true;
-                lm.setValue(rm.getValue());
-                syncScrollLock = false;
-            }
-        });
-    }
-
-    // ---- Keyboard navigation ------------------------------------------
-
-    private void wireKeyboardNavigation() {
-        // Override default arrow key actions in both text panes
-        bindPane(leftPane,  true);
-        bindPane(rightPane, false);
-    }
-
-    private void bindPane(JTextPane pane, boolean isLeft) {
-        InputMap im = pane.getInputMap(JComponent.WHEN_FOCUSED);
-        ActionMap am = pane.getActionMap();
-
-        // ↑/↓ → navigate working set
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_UP,   0), "tc-prev");
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, 0), "tc-next");
-        am.put("tc-prev", action(e -> navigatePrev()));
-        am.put("tc-next", action(e -> navigateNext()));
-
-        // ←/→ → cycle responses in THIS pane
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_LEFT,  0), "resp-back");
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "resp-fwd");
-        am.put("resp-back", action(e -> cycleResponse(isLeft, false)));
-        am.put("resp-fwd",  action(e -> cycleResponse(isLeft, true)));
-    }
-
-    private AbstractAction action(Consumer<ActionEvent> fn) {
-        return new AbstractAction() {
-            @Override public void actionPerformed(ActionEvent e) { fn.accept(e); }
-        };
     }
 
     // ---- Helpers ------------------------------------------------------
@@ -754,38 +569,6 @@ public class CompareTab extends JPanel {
         } catch (Exception e) {
             api.logging().logToError("[BAC] saveNote error: " + e.getMessage());
         }
-    }
-
-    private void loadIgnorePatterns() {
-        loader.submit(() -> {
-            try {
-                String sql = "SELECT value FROM settings WHERE key = 'ignore_patterns'";
-                synchronized (dbManager) {
-                    try (var st = dbManager.getConnection().createStatement();
-                         var rs = st.executeQuery(sql)) {
-                        if (rs.next()) {
-                            String json = rs.getString(1);
-                            if (json != null) {
-                                List<Pattern> pats = new ArrayList<>();
-                                json = json.trim();
-                                if (json.startsWith("[") && json.endsWith("]")) {
-                                    json = json.substring(1, json.length() - 1);
-                                    for (String part : json.split(",")) {
-                                        String s = part.trim();
-                                        if (s.startsWith("\"") && s.endsWith("\""))
-                                            s = s.substring(1, s.length() - 1);
-                                        if (!s.isBlank()) {
-                                            try { pats.add(Pattern.compile(s)); } catch (Exception ignored) {}
-                                        }
-                                    }
-                                }
-                                ignorePatterns = pats;
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-        });
     }
 
     // ---- Static helpers -----------------------------------------------

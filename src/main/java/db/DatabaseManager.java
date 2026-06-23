@@ -76,6 +76,9 @@ public class DatabaseManager {
         addColumnIfMissing("test_cases", "color_tag", "TEXT");
         // notes already exists in the base schema, but guard for very old DBs
         addColumnIfMissing("test_cases", "notes", "TEXT");
+        // Folder coloring (Library tree) and account folders/coloring.
+        addColumnIfMissing("folders", "color", "TEXT");
+        addColumnIfMissing("accounts", "folder_id", "INTEGER");
         // Migrate previous default quick-save hotkeys to the current Alt+Q default.
         // Only rewrite known former defaults so a user's custom combo is preserved.
         try (PreparedStatement ps = connection.prepareStatement(

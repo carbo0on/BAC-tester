@@ -450,13 +450,19 @@ public class LibraryTab extends JPanel {
 
     private void rebuildTree(List<FolderRecord> folders, int inboxCount) {
         treeRoot.removeAllChildren();
+
+        // Virtual "All Requests" node — shows every test case across all folders.
+        DefaultMutableTreeNode all =
+            new DefaultMutableTreeNode(new FolderNode(ALL_ID, "All Requests", null));
+        treeRoot.add(all);
+
         DefaultMutableTreeNode inbox =
-            new DefaultMutableTreeNode(new FolderNode(null, "Inbox (" + inboxCount + ")"));
+            new DefaultMutableTreeNode(new FolderNode(null, "Inbox (" + inboxCount + ")", null));
         treeRoot.add(inbox);
 
         Map<Long, DefaultMutableTreeNode> nodeMap = new HashMap<>();
         for (FolderRecord fr : folders)
-            nodeMap.put(fr.id(), new DefaultMutableTreeNode(new FolderNode(fr.id(), fr.name())));
+            nodeMap.put(fr.id(), new DefaultMutableTreeNode(new FolderNode(fr.id(), fr.name(), fr.color())));
         for (FolderRecord fr : folders) {
             DefaultMutableTreeNode node = nodeMap.get(fr.id());
             if (fr.parentId() == null) treeRoot.add(node);
@@ -468,7 +474,7 @@ public class LibraryTab extends JPanel {
         treeModel.reload();
         if (autoExpandFolders)
             for (int i = 0; i < folderTree.getRowCount(); i++) folderTree.expandRow(i);
-        selectFolderNode(selectedFolderIdState);
+        if (showAll) selectFolderNode(ALL_ID); else selectFolderNode(selectedFolderIdState);
     }
 
     private void selectFolderNode(Long folderId) {
@@ -492,8 +498,12 @@ public class LibraryTab extends JPanel {
             Object last = path.getLastPathComponent();
             if (last instanceof DefaultMutableTreeNode node &&
                 node.getUserObject() instanceof FolderNode fn) {
-                selectedFolderIdState = fn.id();
-                showAll = false;
+                if (Objects.equals(fn.id(), ALL_ID)) {
+                    showAll = true;
+                } else {
+                    showAll = false;
+                    selectedFolderIdState = fn.id();
+                }
                 reloadTable();
             }
         });
@@ -506,9 +516,21 @@ public class LibraryTab extends JPanel {
         JMenuItem renameFolder = new JMenuItem("Rename Folder");
         JMenuItem deleteFolder = new JMenuItem("Delete Folder");
 
+        JMenu colorMenu = new JMenu("Set Folder Color");
+        for (String tag : COLOR_TAGS) {
+            JMenuItem ci = new JMenuItem(tag.charAt(0) + tag.substring(1).toLowerCase());
+            ci.addActionListener(e -> applyFolderColor(tag));
+            colorMenu.add(ci);
+        }
+        colorMenu.addSeparator();
+        JMenuItem clearFolderColor = new JMenuItem("Clear Color");
+        clearFolderColor.addActionListener(e -> applyFolderColor(null));
+        colorMenu.add(clearFolderColor);
+
         popup.add(newFolder);
         popup.add(newSub);
         popup.add(renameFolder);
+        popup.add(colorMenu);
         popup.add(deleteFolder);
 
         folderTree.addMouseListener(new MouseAdapter() {
@@ -519,10 +541,12 @@ public class LibraryTab extends JPanel {
                 TreePath path = folderTree.getPathForLocation(e.getX(), e.getY());
                 folderTree.setSelectionPath(path);
                 FolderNode fn = selectedFolderNode();
-                boolean isInbox = fn == null || fn.id() == null;
-                renameFolder.setEnabled(!isInbox);
-                deleteFolder.setEnabled(!isInbox);
-                newSub.setEnabled(!isInbox);
+                // Inbox (null) and All Requests (ALL_ID) are virtual — not editable.
+                boolean special = fn == null || fn.id() == null || Objects.equals(fn.id(), ALL_ID);
+                renameFolder.setEnabled(!special);
+                deleteFolder.setEnabled(!special);
+                newSub.setEnabled(!special);
+                colorMenu.setEnabled(!special);
                 popup.show(folderTree, e.getX(), e.getY());
             }
         });
@@ -1053,6 +1077,16 @@ public class LibraryTab extends JPanel {
         });
     }
 
+    private void applyFolderColor(String tag) {
+        FolderNode fn = selectedFolderNode();
+        if (fn == null || fn.id() == null || Objects.equals(fn.id(), ALL_ID)) return;
+        long id = fn.id();
+        loader.submit(() -> {
+            try { folderRepo.setColor(id, tag); SwingUtilities.invokeLater(this::refresh); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Set folder color: " + ex.getMessage()); }
+        });
+    }
+
     private List<TestCaseRow> loadRows() throws Exception {
         if (showAll) return tcRepo.getAll();
         return tcRepo.getByFolder(selectedFolderIdState);
@@ -1066,9 +1100,12 @@ public class LibraryTab extends JPanel {
 
     // ---- Inner: folder node ----------------------------------------------
 
-    record FolderNode(Long id, String displayName) {
+    /** id == null → Inbox, id == ALL_ID → All Requests, otherwise a real folder id. */
+    record FolderNode(Long id, String displayName, String color) {
         @Override public String toString() { return displayName; }
     }
+
+    private static final Long ALL_ID = -1L;
 
     // ---- Inner: table model ----------------------------------------------
 
@@ -1208,6 +1245,21 @@ public class LibraryTab extends JPanel {
     // ---- Inner: folder tree renderer -------------------------------------
 
     private static class FolderTreeRenderer extends DefaultTreeCellRenderer {
+
+        // Light pastel folder tints (foreground text color) — gentle, theme-friendly.
+        private static Color tagColor(String tag) {
+            if (tag == null) return null;
+            return switch (tag.toUpperCase()) {
+                case "RED"    -> new Color(0xE0, 0x6C, 0x6C);
+                case "ORANGE" -> new Color(0xE0, 0xA0, 0x55);
+                case "YELLOW" -> new Color(0xC9, 0xB8, 0x3A);
+                case "GREEN"  -> new Color(0x5F, 0xBF, 0x5F);
+                case "BLUE"   -> new Color(0x5F, 0x96, 0xE0);
+                case "PURPLE" -> new Color(0xB0, 0x7C, 0xE0);
+                default       -> null;
+            };
+        }
+
         @Override
         public Component getTreeCellRendererComponent(JTree tree, Object value,
                 boolean selected, boolean expanded, boolean leaf, int row, boolean focus) {
@@ -1216,8 +1268,13 @@ public class LibraryTab extends JPanel {
                 node.getUserObject() instanceof FolderNode fn) {
                 setText(fn.displayName());
                 setIcon(UIManager.getIcon("FileView.directoryIcon"));
-                // Inbox uses a different icon
-                if (fn.id() == null) setIcon(UIManager.getIcon("FileView.computerIcon"));
+                if (fn.id() == null) setIcon(UIManager.getIcon("FileView.computerIcon"));        // Inbox
+                else if (Objects.equals(fn.id(), ALL_ID)) setIcon(UIManager.getIcon("FileView.hardDriveIcon")); // All
+                // Tint the folder label by its color (only when not selected, to keep contrast).
+                if (!selected) {
+                    Color c = tagColor(fn.color());
+                    if (c != null) setForeground(c);
+                }
             }
             return this;
         }

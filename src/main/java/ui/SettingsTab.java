@@ -41,6 +41,7 @@ public class SettingsTab extends JPanel {
     private JCheckBox autoExpandCheck;
     private JCheckBox confirmRunCheck;
     private JCheckBox dedupCheck;
+    private JTextField hotkeyField;
     private DefaultListModel<String> patternModel;
     private JLabel dbPathLabel;
 
@@ -97,6 +98,20 @@ public class SettingsTab extends JPanel {
         scopeCombo = new JComboBox<>(new String[]{"WARN", "BLOCK", "OFF"});
         form.add(row("Out-of-scope handling:", scopeCombo,
             "WARN: log and continue · BLOCK: skip out-of-scope requests · OFF: ignore scope"));
+
+        form.add(gap(10));
+
+        // ── Capture ────────────────────────────────────────────────────────
+        form.add(sectionTitle("Capture"));
+        hotkeyField = new JTextField(14);
+        form.add(row("Quick-save hotkey:", hotkeyField,
+            "Combo used to quick-save the focused request to Inbox. Same format as Burp's "
+            + "Settings (e.g. Alt+Meta for Alt+Windows, or Ctrl+Alt+A). Takes effect after "
+            + "you reload the extension."));
+        JLabel hotkeyHint = new JLabel("<html><small>Changing the hotkey requires reloading the "
+            + "extension (Extensions ▸ toggle the Loaded checkbox).</small></html>");
+        hotkeyHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        form.add(hotkeyHint);
 
         form.add(gap(10));
 
@@ -247,6 +262,7 @@ public class SettingsTab extends JPanel {
                 String dedup       = db.getSetting("dedup_on_import");
                 String patterns    = db.getSetting("ignore_patterns");
                 String dbPath      = db.getSetting("db_path");
+                String hotkey      = db.getSetting("hotkey_combo");
 
                 SwingUtilities.invokeLater(() -> {
                     setSpinner(thresholdSpinner, threshold);
@@ -267,6 +283,7 @@ public class SettingsTab extends JPanel {
                             if (list != null) list.forEach(patternModel::addElement);
                         } catch (Exception ignored) {}
                     }
+                    hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Alt+Meta");
                     if (dbPath != null) dbPathLabel.setText(dbPath);
                     else dbPathLabel.setText(api.persistence().preferences().getString("bac_db_path"));
                 });
@@ -299,6 +316,8 @@ public class SettingsTab extends JPanel {
         boolean autoExpand = autoExpandCheck.isSelected();
         boolean confirmRun = confirmRunCheck.isSelected();
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
+        String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Alt+Meta";
+        final String hotkeyToSave = hotkeyRaw.isBlank() ? "Alt+Meta" : hotkeyRaw;
         List<String> patterns = new ArrayList<>();
         for (int i = 0; i < patternModel.size(); i++) patterns.add(patternModel.get(i));
         String patternsJson = gson.toJson(patterns);
@@ -316,6 +335,7 @@ public class SettingsTab extends JPanel {
                 db.setSetting("auto_expand_folders", String.valueOf(autoExpand));
                 db.setSetting("confirm_before_run", String.valueOf(confirmRun));
                 db.setSetting("dedup_on_import", String.valueOf(dedup));
+                db.setSetting("hotkey_combo", hotkeyToSave);
                 db.setSetting("ignore_patterns", patternsJson);
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(this, "Settings saved.", "Saved", JOptionPane.INFORMATION_MESSAGE);

@@ -77,16 +77,31 @@ public class Extension implements BurpExtension {
             new BacContextMenuProvider(api, capture, accountRepo,
                                        new FolderRepository(dbManager)));
 
-        // --- 6. Hotkey: Ctrl+Alt+A → quick-save to Inbox ----------------
-        api.userInterface().registerHotKeyHandler(
-            HotKeyContext.HTTP_MESSAGE_EDITOR,
-            HotKey.hotKey("BAC: Quick-save request", "Ctrl+Alt+A"),
-            event -> event.messageEditorRequestResponse().ifPresent(editor ->
-                capture.quickSaveToInbox(editor.requestResponse())
-            )
-        );
+        // --- 6. Hotkey: quick-save to Inbox (configurable in Settings) ---
+        // Default is Alt+Meta (Alt + Windows key). The combo is read from the
+        // settings table so users can rebind it; changing it takes effect after
+        // the extension is reloaded. Registration is wrapped so an unsupported
+        // combo only logs a warning instead of aborting extension load.
+        String hotkeyCombo = "Alt+Meta";
+        try {
+            String stored = dbManager.getSetting("hotkey_combo");
+            if (stored != null && !stored.isBlank()) hotkeyCombo = stored.trim();
+        } catch (Exception ignored) {}
 
-        logging.logToOutput("[BAC] BAC Time-Machine loaded. Hotkey: Ctrl+Alt+A");
+        try {
+            api.userInterface().registerHotKeyHandler(
+                HotKeyContext.HTTP_MESSAGE_EDITOR,
+                HotKey.hotKey("BAC: Quick-save request", hotkeyCombo),
+                event -> event.messageEditorRequestResponse().ifPresent(editor ->
+                    capture.quickSaveToInbox(editor.requestResponse())
+                )
+            );
+            logging.logToOutput("[BAC] BAC Time-Machine loaded. Quick-save hotkey: " + hotkeyCombo);
+        } catch (Exception e) {
+            logging.logToError("[BAC] Could not register hotkey \"" + hotkeyCombo
+                + "\" (" + e.getMessage() + "). Set a valid combo in BAC Settings and reload.");
+            logging.logToOutput("[BAC] BAC Time-Machine loaded (hotkey not registered).");
+        }
     }
 
     // ---- Context menu provider -----------------------------------------

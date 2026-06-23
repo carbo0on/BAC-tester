@@ -1,6 +1,12 @@
 package ui;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.ui.editor.EditorOptions;
+import burp.api.montoya.ui.editor.HttpRequestEditor;
+import burp.api.montoya.ui.editor.HttpResponseEditor;
 import db.AccountRepository;
 import db.DatabaseManager;
 import db.FolderRepository;
@@ -14,6 +20,8 @@ import java.util.Map;
 import javax.swing.*;
 import javax.swing.table.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -22,6 +30,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Phase 4 — Test Run tab.
@@ -86,6 +96,12 @@ public class TestRunTab extends JPanel {
     private String activeVerdictFilter = null;
     private JTextField resultsSearch;
     private JComboBox<String> statusFilterCombo;
+    private JComboBox<String> sizeFilterCombo;
+    private ColumnManager columnManager;
+
+    // Inline request/response viewer (Burp-native, read-only)
+    private HttpRequestEditor  reqViewer;
+    private HttpResponseEditor respViewer;
 
     // Verdict summary counts (updated as results stream in)
     private final Map<String, Integer> verdictCounts = new HashMap<>();
@@ -279,7 +295,8 @@ public class TestRunTab extends JPanel {
     private void applyResultsFilter() {
         String search = resultsSearch != null ? resultsSearch.getText().trim().toLowerCase() : "";
         String statusSel = statusFilterCombo != null ? (String) statusFilterCombo.getSelectedItem() : "All Status";
-        tableModel.applyFilter(activeVerdictFilter, search, statusSel);
+        String sizeSel = sizeFilterCombo != null ? (String) sizeFilterCombo.getSelectedItem() : "Any size";
+        tableModel.applyFilter(activeVerdictFilter, search, statusSel, sizeSel);
     }
 
     private JPanel buildResultsPanel() {
@@ -323,14 +340,28 @@ public class TestRunTab extends JPanel {
         statusFilterCombo.addActionListener(e -> applyResultsFilter());
         searchBar.add(statusFilterCombo);
 
+        searchBar.add(new JLabel("  Size:"));
+        sizeFilterCombo = new JComboBox<>(new String[]{
+            "Any size", "< 1 KB", "1–10 KB", "10–100 KB", "> 100 KB"
+        });
+        sizeFilterCombo.setPreferredSize(new Dimension(110, 24));
+        sizeFilterCombo.addActionListener(e -> applyResultsFilter());
+        searchBar.add(sizeFilterCombo);
+
         JButton clearBtn = new JButton("✕ Clear");
         clearBtn.setFont(clearBtn.getFont().deriveFont(11f));
         clearBtn.addActionListener(e -> {
             resultsSearch.setText("");
             statusFilterCombo.setSelectedIndex(0);
+            sizeFilterCombo.setSelectedIndex(0);
             applyResultsFilter();
         });
         searchBar.add(clearBtn);
+
+        JButton colsBtn = new JButton("Columns ▾");
+        colsBtn.setFont(colsBtn.getFont().deriveFont(11f));
+        colsBtn.setToolTipText("Show / hide columns and restore the default layout");
+        searchBar.add(colsBtn);
 
         JPanel northPanel = new JPanel(new BorderLayout());
         northPanel.add(filterBar, BorderLayout.NORTH);
@@ -342,20 +373,25 @@ public class TestRunTab extends JPanel {
         resultsTable = new JTable(tableModel);
         resultsTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         resultsTable.setRowHeight(22);
-        resultsTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
-        resultsTable.getTableHeader().setReorderingAllowed(false);
-
-        // Column widths
-        int[] widths = {110, 65, 180, 180, 65, 95, 80, 70};
-        for (int i = 0; i < widths.length && i < tableModel.getColumnCount(); i++) {
-            resultsTable.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
-        }
-
+        resultsTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF); // honour per-column widths
+        resultsTable.getTableHeader().setReorderingAllowed(true);
         resultsTable.setDefaultRenderer(Object.class, new VerdictCellRenderer());
 
+        // Show/hide columns + restore default layout
+        columnManager = new ColumnManager(resultsTable);
+        colsBtn.addActionListener(e -> columnManager.showMenu(colsBtn));
+        // Header right-click also opens the column chooser
+        resultsTable.getTableHeader().addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e)  { maybe(e); }
+            @Override public void mouseReleased(MouseEvent e) { maybe(e); }
+            private void maybe(MouseEvent e) {
+                if (e.isPopupTrigger()) columnManager.showMenu(e.getComponent(), e.getX(), e.getY());
+            }
+        });
+
         // Double-click → open in Compare
-        resultsTable.addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+        resultsTable.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && onOpenInCompare != null) {
                     int row = resultsTable.rowAtPoint(e.getPoint());
                     if (row < 0) return;
@@ -365,9 +401,69 @@ public class TestRunTab extends JPanel {
             }
         });
 
-        panel.add(new JScrollPane(resultsTable), BorderLayout.CENTER);
+        // Single-click → populate the inline request/response viewer
+        resultsTable.getSelectionModel().addListSelectionListener(e -> {
+            if (e.getValueIsAdjusting()) return;
+            int row = resultsTable.getSelectedRow();
+            if (row >= 0) populateViewer(tableModel.getRow(row));
+        });
+
+        JScrollPane tableScroll = new JScrollPane(resultsTable);
+        tableScroll.setMinimumSize(new Dimension(0, 150));
+
+        // Inline viewer (request left / response right)
+        reqViewer  = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
+        respViewer = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+        JPanel viewer = buildViewerPanel();
+
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableScroll, viewer);
+        split.setResizeWeight(0.55);
+        split.setDividerLocation(0.55);
+        split.setDividerSize(5);
+        split.setContinuousLayout(true);
+
+        panel.add(split, BorderLayout.CENTER);
         api.userInterface().applyThemeToComponent(panel);
         return panel;
+    }
+
+    private JPanel buildViewerPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JLabel header = new JLabel("  Request / Response  —  select a result row to preview");
+        header.setFont(header.getFont().deriveFont(Font.ITALIC, 11f));
+        header.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0,
+            UIManager.getColor("Separator.foreground")));
+        panel.add(header, BorderLayout.NORTH);
+
+        JSplitPane sp = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+            reqViewer.uiComponent(), respViewer.uiComponent());
+        sp.setResizeWeight(0.5);
+        sp.setDividerLocation(0.5);
+        sp.setDividerSize(4);
+        sp.setContinuousLayout(true);
+        panel.add(sp, BorderLayout.CENTER);
+        return panel;
+    }
+
+    /** Loads the test-case request and the result's stored response into the viewer. */
+    private void populateViewer(RunRepository.ResultRecord rec) {
+        if (rec == null) return;
+        final long tcId = rec.testCaseId();
+        final byte[] respBytes = rec.newResponseRaw();
+        loader.submit(() -> {
+            byte[] reqBytes = null;
+            try { reqBytes = tcRepo.getRequestRaw(tcId); }
+            catch (Exception ex) { api.logging().logToError("[BAC] Viewer request load: " + ex.getMessage()); }
+            final byte[] req = reqBytes;
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    if (req != null && req.length > 0)
+                        reqViewer.setRequest(HttpRequest.httpRequest(ByteArray.byteArray(req)));
+                    if (respBytes != null && respBytes.length > 0)
+                        respViewer.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(respBytes)));
+                } catch (Exception ignored) {}
+            });
+        });
     }
 
     // ---- Engine wiring -------------------------------------------------
@@ -545,17 +641,35 @@ public class TestRunTab extends JPanel {
 
     // ---- Table model ---------------------------------------------------
 
+    /** A result row plus values derived once from the stored response/URL. */
+    private static final class Row {
+        final RunRepository.ResultRecord rec;
+        final String path;
+        final int params;
+        final String mime;
+        final String title;
+        Row(RunRepository.ResultRecord rec) {
+            this.rec    = rec;
+            this.path   = ResultsTableModel.extractPath(rec.url());
+            this.params = ResultsTableModel.paramCount(rec.url());
+            this.mime   = ResultsTableModel.mimeType(rec.newResponseRaw());
+            this.title  = ResultsTableModel.pageTitle(rec.newResponseRaw());
+        }
+    }
+
+    static final String[] RESULT_COLS = {
+        "Verdict", "Host", "Account", "Method", "URL", "Params", "Status",
+        "Length", "MIME type", "Title", "Notes", "Time requested", "Similarity", "Reviewed"
+    };
+
     private static class ResultsTableModel extends AbstractTableModel {
-        private static final String[] COLS = {
-            "Verdict", "Method", "Host", "Name", "Status", "Similarity", "Expected", "Reviewed"
-        };
-        private final List<RunRepository.ResultRecord> allRows = new ArrayList<>();
-        private final List<RunRepository.ResultRecord> rows = new ArrayList<>();
+        private final List<Row> allRows = new ArrayList<>();
+        private final List<Row> rows = new ArrayList<>();
 
         void addResult(RunRepository.ResultRecord r) {
-            allRows.add(r);
-            // Only show if it passes current filter state
-            rows.add(r);
+            Row row = new Row(r);
+            allRows.add(row);
+            rows.add(row);
             fireTableRowsInserted(rows.size() - 1, rows.size() - 1);
         }
 
@@ -565,20 +679,24 @@ public class TestRunTab extends JPanel {
             fireTableDataChanged();
         }
 
-        void applyFilter(String verdict, String search, String statusSel) {
+        void applyFilter(String verdict, String search, String statusSel, String sizeSel) {
             rows.clear();
-            for (var r : allRows) {
+            for (Row row : allRows) {
+                var r = row.rec;
                 if (verdict != null && !verdict.equals(r.verdict())) continue;
-                if (!matchesSearch(r, search)) continue;
+                if (!matchesSearch(row, search)) continue;
                 if (!matchesStatus(r, statusSel)) continue;
-                rows.add(r);
+                if (!matchesSize(r, sizeSel)) continue;
+                rows.add(row);
             }
             fireTableDataChanged();
         }
 
-        private static boolean matchesSearch(RunRepository.ResultRecord r, String q) {
+        private static boolean matchesSearch(Row row, String q) {
             if (q == null || q.isBlank()) return true;
-            return ci(r.testCaseName(), q) || ci(r.host(), q) || ci(r.url(), q) || ci(r.method(), q);
+            var r = row.rec;
+            return ci(r.testCaseName(), q) || ci(r.host(), q) || ci(r.url(), q)
+                || ci(r.method(), q) || ci(r.accountName(), q) || ci(row.title, q);
         }
 
         private static boolean ci(String s, String q) {
@@ -600,31 +718,49 @@ public class TestRunTab extends JPanel {
             };
         }
 
-        @Override public int getRowCount() { return rows.size(); }
-        @Override public int getColumnCount() { return COLS.length; }
-        @Override public String getColumnName(int col) { return COLS[col]; }
-        @Override public Class<?> getColumnClass(int col) {
-            return col == 7 ? Boolean.class : String.class;
+        private static boolean matchesSize(RunRepository.ResultRecord r, String sel) {
+            if (sel == null || sel.startsWith("Any")) return true;
+            int n = r.newLength();
+            return switch (sel) {
+                case "< 1 KB"     -> n < 1024;
+                case "1–10 KB"    -> n >= 1024 && n < 10 * 1024;
+                case "10–100 KB"  -> n >= 10 * 1024 && n < 100 * 1024;
+                case "> 100 KB"   -> n >= 100 * 1024;
+                default -> true;
+            };
         }
 
-        @Override public Object getValueAt(int row, int col) {
-            RunRepository.ResultRecord r = rows.get(row);
+        @Override public int getRowCount() { return rows.size(); }
+        @Override public int getColumnCount() { return RESULT_COLS.length; }
+        @Override public String getColumnName(int col) { return RESULT_COLS[col]; }
+        @Override public Class<?> getColumnClass(int col) { return String.class; }
+
+        @Override public Object getValueAt(int rowIdx, int col) {
+            Row row = rows.get(rowIdx);
+            var r = row.rec;
+            boolean noBody = r.verdict().equals(RunEngine.SKIPPED_SAFE) || r.verdict().equals(RunEngine.ERROR);
             return switch (col) {
-                case 0 -> verdictLabel(r.verdict());
-                case 1 -> r.method();
-                case 2 -> r.host();
-                case 3 -> r.testCaseName();
-                case 4 -> r.newStatus() > 0 ? String.valueOf(r.newStatus()) : "-";
-                case 5 -> r.verdict().equals(RunEngine.SKIPPED_SAFE) || r.verdict().equals(RunEngine.ERROR)
-                          ? "-" : String.format("%.1f%%", r.similarity());
-                case 6 -> r.expectedAccess();
-                case 7 -> r.reviewed();
+                case 0  -> verdictLabel(r.verdict());
+                case 1  -> r.host();
+                case 2  -> r.accountName() != null ? r.accountName() : "—";
+                case 3  -> r.method();
+                case 4  -> row.path;
+                case 5  -> row.params >= 0 ? String.valueOf(row.params) : "—";
+                case 6  -> r.newStatus() > 0 ? String.valueOf(r.newStatus()) : "—";
+                case 7  -> formatSize(r.newLength());
+                case 8  -> row.mime != null ? row.mime : "—";
+                case 9  -> row.title != null ? row.title : "";
+                case 10 -> r.userNote() != null ? r.userNote().replaceAll("\\s+", " ").trim()
+                                                : (r.testCaseName() != null ? r.testCaseName() : "");
+                case 11 -> FMT.format(Instant.ofEpochSecond(r.createdAt()));
+                case 12 -> noBody ? "—" : String.format("%.1f%%", r.similarity());
+                case 13 -> r.reviewed() ? "✓" : "";
                 default -> "";
             };
         }
 
         RunRepository.ResultRecord getRow(int row) {
-            return row >= 0 && row < rows.size() ? rows.get(row) : null;
+            return row >= 0 && row < rows.size() ? rows.get(row).rec : null;
         }
 
         private static String verdictLabel(String v) {
@@ -638,6 +774,131 @@ public class TestRunTab extends JPanel {
                 case RunEngine.ERROR           -> "✗ ERROR";
                 default -> v;
             };
+        }
+
+        // ---- Derived-value helpers (raw byte parsing — no MontoyaApi needed) ----
+
+        private static String formatSize(int bytes) {
+            if (bytes <= 0) return "—";
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+            return String.format("%.1f MB", bytes / (1024.0 * 1024));
+        }
+
+        private static String extractPath(String url) {
+            if (url == null) return "/";
+            try {
+                var uri = new java.net.URI(url);
+                String p = uri.getPath();
+                String q = uri.getQuery();
+                if (p == null || p.isEmpty()) p = "/";
+                return q != null ? p + "?" + q : p;
+            } catch (Exception e) {
+                int slash = url.indexOf('/', url.indexOf("//") + 2);
+                return slash >= 0 ? url.substring(slash) : url;
+            }
+        }
+
+        private static int paramCount(String url) {
+            if (url == null) return 0;
+            int q = url.indexOf('?');
+            if (q < 0 || q == url.length() - 1) return 0;
+            String query = url.substring(q + 1);
+            int count = 0;
+            for (String part : query.split("&")) if (!part.isBlank()) count++;
+            return count;
+        }
+
+        private static String mimeType(byte[] resp) {
+            if (resp == null || resp.length == 0) return null;
+            String head = new String(resp, 0, Math.min(resp.length, 4096));
+            Matcher m = Pattern.compile("(?im)^Content-Type:\\s*([^;\\r\\n]+)").matcher(head);
+            if (m.find()) {
+                String ct = m.group(1).trim();
+                int slash = ct.indexOf('/');
+                return slash >= 0 ? ct.substring(slash + 1) : ct; // short form, e.g. "html", "json"
+            }
+            return null;
+        }
+
+        private static String pageTitle(byte[] resp) {
+            if (resp == null || resp.length == 0) return null;
+            String body = new String(resp, 0, Math.min(resp.length, 65536));
+            Matcher m = Pattern.compile("(?is)<title[^>]*>(.*?)</title>").matcher(body);
+            if (m.find()) {
+                String t = m.group(1).replaceAll("\\s+", " ").trim();
+                return t.isEmpty() ? null : t;
+            }
+            return null;
+        }
+    }
+
+    // ---- Column show/hide manager --------------------------------------
+
+    /** Manages column visibility, default widths, and "restore default layout". */
+    private final class ColumnManager {
+        private final JTable t;
+        private final TableColumn[] all;        // indexed by model column index
+        private final boolean[] visible;
+        private final int[] defaultWidths = {130, 150, 120, 70, 240, 70, 70, 80, 110, 200, 160, 140, 90, 90};
+
+        ColumnManager(JTable table) {
+            this.t = table;
+            int n = table.getColumnModel().getColumnCount();
+            all = new TableColumn[n];
+            visible = new boolean[n];
+            for (int i = 0; i < n; i++) {
+                TableColumn tc = table.getColumnModel().getColumn(i);
+                tc.setIdentifier(RESULT_COLS[i]);
+                all[i] = tc;
+                visible[i] = true;
+            }
+            restoreDefault();
+        }
+
+        void showMenu(Component invoker)                 { buildMenu().show(invoker, 0, invoker.getHeight()); }
+        void showMenu(Component invoker, int x, int y)   { buildMenu().show(invoker, x, y); }
+
+        private JPopupMenu buildMenu() {
+            JPopupMenu menu = new JPopupMenu();
+            for (int i = 0; i < all.length; i++) {
+                final int idx = i;
+                JCheckBoxMenuItem item = new JCheckBoxMenuItem(RESULT_COLS[i], visible[i]);
+                item.addActionListener(e -> setVisible(idx, item.isSelected()));
+                menu.add(item);
+            }
+            menu.addSeparator();
+            JMenuItem restore = new JMenuItem("Restore default layout");
+            restore.addActionListener(e -> restoreDefault());
+            menu.add(restore);
+            return menu;
+        }
+
+        private void setVisible(int modelIdx, boolean show) {
+            if (visible[modelIdx] == show) return;
+            // Keep at least one column visible
+            if (!show) {
+                int shown = 0;
+                for (boolean b : visible) if (b) shown++;
+                if (shown <= 1) return;
+            }
+            visible[modelIdx] = show;
+            rebuild();
+        }
+
+        private void restoreDefault() {
+            for (int i = 0; i < visible.length; i++) {
+                visible[i] = true;
+                all[i].setPreferredWidth(i < defaultWidths.length ? defaultWidths[i] : 100);
+            }
+            rebuild();
+        }
+
+        /** Rebuild the column model from scratch in model-index order. */
+        private void rebuild() {
+            TableColumnModel cm = t.getColumnModel();
+            while (cm.getColumnCount() > 0) cm.removeColumn(cm.getColumn(0));
+            for (int i = 0; i < all.length; i++) if (visible[i]) cm.addColumn(all[i]);
         }
     }
 

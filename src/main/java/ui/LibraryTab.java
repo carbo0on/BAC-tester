@@ -1134,13 +1134,16 @@ public class LibraryTab extends JPanel {
 
     private class MethodAwareRenderer extends javax.swing.table.DefaultTableCellRenderer {
 
-        // Pastel overlays — same low-alpha approach as Burp Proxy history colours.
-        private static final Color RED_BG    = new Color(255, 80,  80,  55);
-        private static final Color ORANGE_BG = new Color(255, 155, 40,  55);
-        private static final Color YELLOW_BG = new Color(245, 215, 40,  55);
-        private static final Color GREEN_BG  = new Color(60,  200, 60,  55);
-        private static final Color BLUE_BG   = new Color(60,  140, 255, 55);
-        private static final Color PURPLE_BG = new Color(170, 70,  255, 55);
+        // Light pastel highlights mirroring Burp's Proxy-history row colours.
+        // These are *light* base tints (not saturated) blended at low alpha so
+        // rows read as gentle highlights on both light and dark themes rather
+        // than heavy, dark fills.
+        private static final Color RED_BG    = new Color(255, 165, 165, 90);
+        private static final Color ORANGE_BG = new Color(255, 205, 135, 90);
+        private static final Color YELLOW_BG = new Color(250, 240, 150, 90);
+        private static final Color GREEN_BG  = new Color(180, 235, 180, 90);
+        private static final Color BLUE_BG   = new Color(170, 205, 255, 90);
+        private static final Color PURPLE_BG = new Color(215, 180, 250, 90);
 
         @Override
         public Component getTableCellRendererComponent(JTable t, Object value,

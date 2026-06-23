@@ -17,6 +17,10 @@ public class DatabaseManager {
     private final Logging logging;
     private Connection connection;
 
+    /** Cache the validity probe so we don't fire a round-trip query on every JDBC call. */
+    private long lastValidatedAtMs = 0L;
+    private static final long VALIDATION_INTERVAL_MS = 2000L;
+
     public DatabaseManager(String dbPath, Logging logging) {
         this.dbPath = dbPath;
         this.logging = logging;
@@ -35,17 +39,32 @@ public class DatabaseManager {
             throw new Exception("SQLite JDBC driver not found on classpath", e);
         }
 
-        connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-
-        try (Statement st = connection.createStatement()) {
-            st.execute("PRAGMA journal_mode=WAL");
-            st.execute("PRAGMA foreign_keys=ON");
-            st.execute("PRAGMA busy_timeout=5000");
-        }
+        connection = openConnection();
 
         createSchema();
         migrateSchema();
         insertDefaultSettings();
+    }
+
+    /**
+     * Opens a fresh JDBC connection and applies the standard pragmas. A short
+     * busy timeout lets concurrent writers wait for the WAL lock instead of
+     * failing immediately with SQLITE_BUSY, which is the most common cause of
+     * the "database keeps disconnecting" symptom.
+     */
+    private Connection openConnection() throws SQLException {
+        org.sqlite.SQLiteConfig cfg = new org.sqlite.SQLiteConfig();
+        cfg.setBusyTimeout(15000);
+        cfg.setJournalMode(org.sqlite.SQLiteConfig.JournalMode.WAL);
+        cfg.setEncoding(org.sqlite.SQLiteConfig.Encoding.UTF8);
+        Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath, cfg.toProperties());
+        try (Statement st = conn.createStatement()) {
+            st.execute("PRAGMA foreign_keys=ON");
+            st.execute("PRAGMA busy_timeout=15000");
+            st.execute("PRAGMA synchronous=NORMAL");
+        }
+        lastValidatedAtMs = System.currentTimeMillis();
+        return conn;
     }
 
     /**
@@ -57,6 +76,13 @@ public class DatabaseManager {
         addColumnIfMissing("test_cases", "color_tag", "TEXT");
         // notes already exists in the base schema, but guard for very old DBs
         addColumnIfMissing("test_cases", "notes", "TEXT");
+        // Migrate the old default quick-save hotkey to the new Alt+Win default.
+        // Only rewrite the previous default so a user's custom combo is preserved.
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE settings SET value = 'Alt+Meta' WHERE key = 'hotkey_combo' AND value = 'Ctrl+Alt+A'")) {
+            int n = ps.executeUpdate();
+            if (n > 0) logging.logToOutput("[BAC] Migration: quick-save hotkey default updated to Alt+Meta");
+        }
     }
 
     private void addColumnIfMissing(String table, String column, String type) throws SQLException {
@@ -195,7 +221,7 @@ public class DatabaseManager {
                 {"ignore_patterns",  "[\"\\\\d{10,13}\",\"csrf[_-]?token=[^&\\\\s]+\",\"nonce=[^&\\\\s]+\"]"},
                 {"safe_mode",        "true"},
                 {"font_size",        "12"},
-                {"hotkey_combo",     "Ctrl+Alt+A"},
+                {"hotkey_combo",     "Alt+Meta"},   // Alt + Windows/Meta key
                 // Phase 7.1 additions
                 {"coloring_mode",    "AUTO"},   // AUTO (by method) / MANUAL / OFF
                 {"review_lower_bound", "60"},    // grey-zone lower bound for REVIEW verdict
@@ -228,27 +254,42 @@ public class DatabaseManager {
      * through a single monitor.
      */
     public synchronized Connection getConnection() {
-        try {
-            if (connection == null || isConnectionBroken()) {
-                logging.logToOutput("[BAC] Re-opening database connection at: " + dbPath);
+        if (connection != null && !isConnectionBroken()) {
+            return connection;
+        }
+        // Connection is null or broken — reconnect with a few retries to ride out
+        // transient file-lock / handle-reclaim situations instead of giving up.
+        Exception last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                logging.logToOutput("[BAC] (Re)opening database connection at: " + dbPath
+                    + (attempt > 1 ? " (attempt " + attempt + ")" : ""));
                 try { if (connection != null) connection.close(); } catch (Exception ignored) {}
-                connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-                try (Statement st = connection.createStatement()) {
-                    st.execute("PRAGMA journal_mode=WAL");
-                    st.execute("PRAGMA foreign_keys=ON");
-                    st.execute("PRAGMA busy_timeout=5000");  // wait up to 5 s instead of failing immediately
+                connection = openConnection();
+                return connection;
+            } catch (Exception e) {
+                last = e;
+                try { Thread.sleep(150L * attempt); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
-        } catch (Exception e) {
-            logging.logToError("[BAC] Database reconnect failed: " + e.getMessage());
         }
-        return connection;
+        logging.logToError("[BAC] Database reconnect failed after retries: "
+            + (last != null ? last.getMessage() : "unknown"));
+        return connection; // may be null/stale; callers handle SQLExceptions
     }
 
     private boolean isConnectionBroken() {
         try {
-            // isValid() sends a lightweight probe query; timeout=1 s
-            return connection.isClosed() || !connection.isValid(1);
+            if (connection.isClosed()) return true;
+            // Probe with isValid() only periodically — calling it on every JDBC
+            // access adds a round-trip and was itself a source of churn.
+            long now = System.currentTimeMillis();
+            if (now - lastValidatedAtMs < VALIDATION_INTERVAL_MS) return false;
+            boolean ok = connection.isValid(2);
+            if (ok) lastValidatedAtMs = now;
+            return !ok;
         } catch (Exception e) {
             return true;
         }

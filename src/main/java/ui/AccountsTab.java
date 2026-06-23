@@ -502,15 +502,15 @@ public class AccountsTab extends JPanel {
                 int index, boolean selected, boolean focus) {
             super.getListCellRendererComponent(list, value, index, selected, focus);
             if (value instanceof AccountRecord a) {
-                String access = a.expectedAccess();
-                String badge = switch (access != null ? access : "UNKNOWN") {
-                    case "DENIED"  -> " [DENIED]";
-                    case "ALLOWED" -> " [ALLOWED]";
-                    default        -> "";
-                };
-                setText(a.name() + badge);
+                // Compact label: "1:usertest". Details live in the hover tooltip.
+                setText(a.id() + ":" + a.name());
+                String access = a.expectedAccess() != null ? a.expectedAccess() : "UNKNOWN";
                 String role = a.roleDesc();
-                if (role != null && !role.isBlank()) setToolTipText(role);
+                StringBuilder tip = new StringBuilder();
+                tip.append("Account #").append(a.id()).append("  ·  ").append(a.name());
+                if (role != null && !role.isBlank()) tip.append("  ·  Role: ").append(role.trim());
+                tip.append("  ·  Expected access: ").append(access);
+                setToolTipText(tip.toString());
             }
             return this;
         }

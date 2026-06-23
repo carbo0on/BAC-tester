@@ -20,6 +20,8 @@ import java.util.Map;
 import javax.swing.*;
 import javax.swing.table.*;
 import java.awt.*;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.time.Instant;
@@ -418,9 +420,19 @@ public class TestRunTab extends JPanel {
 
         JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableScroll, viewer);
         split.setResizeWeight(0.55);
-        split.setDividerLocation(0.55);
         split.setDividerSize(5);
         split.setContinuousLayout(true);
+        // Proportional divider locations are ignored until the split has a real
+        // size; apply it once on first layout so the viewer is never collapsed.
+        split.addComponentListener(new ComponentAdapter() {
+            private boolean applied = false;
+            @Override public void componentResized(ComponentEvent e) {
+                if (!applied && split.getHeight() > 0) {
+                    applied = true;
+                    split.setDividerLocation(0.55);
+                }
+            }
+        });
 
         panel.add(split, BorderLayout.CENTER);
         api.userInterface().applyThemeToComponent(panel);
@@ -459,9 +471,20 @@ public class TestRunTab extends JPanel {
                 try {
                     if (req != null && req.length > 0)
                         reqViewer.setRequest(HttpRequest.httpRequest(ByteArray.byteArray(req)));
-                    if (respBytes != null && respBytes.length > 0)
+                    if (respBytes != null && respBytes.length > 0) {
                         respViewer.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(respBytes)));
-                } catch (Exception ignored) {}
+                    } else {
+                        // No stored response (SKIPPED / ERROR / unreachable target).
+                        respViewer.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(
+                            "HTTP/1.1 000 No response stored\r\nContent-Type: text/plain\r\n\r\n"
+                          + "This result has no captured response.\r\n"
+                          + "Cause: the request was skipped (Safe Mode), errored, or the target was "
+                          + "unreachable/out of scope. Check the extension Output log for details, "
+                          + "then re-run.")));
+                    }
+                } catch (Exception ex) {
+                    api.logging().logToError("[BAC] Viewer render failed: " + ex.getMessage());
+                }
             });
         });
     }

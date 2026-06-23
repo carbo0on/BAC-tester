@@ -201,11 +201,21 @@ public class RunEngine {
 
             var result = api.http().sendRequest(req);
             var response = result.response();
+            if (response == null) {
+                api.logging().logToError("[BAC] Run TC " + tcId + " (" + tc.method() + " "
+                    + tc.host() + ":" + tc.port() + " https=" + tc.isHttps()
+                    + "): no response (connection failed / unreachable / out of scope).");
+                saveResult(runId, tc, account, baselineId > 0 ? baselineId : null,
+                           0, 0, "", new byte[0], 0.0, ERROR);
+                return;
+            }
             int newStatus = response.statusCode();
             byte[] newResponseRaw = response.toByteArray().getBytes();
             byte[] newBody = response.body().getBytes();
             int newLength = newBody.length;
             String newHash = TestCaseRepository.sha256(newBody);
+            api.logging().logToOutput("[BAC] Run TC " + tcId + ": status=" + newStatus
+                + " responseBytes=" + newResponseRaw.length);
 
             // Extract baseline body for similarity
             byte[] baselineBody = extractBody(baselineRaw);
@@ -222,7 +232,8 @@ public class RunEngine {
                 newStatus, newLength, newHash, newResponseRaw, similarity, verdict);
 
         } catch (Exception e) {
-            api.logging().logToError("[BAC] Error running test case " + tcId + ": " + e.getMessage());
+            api.logging().logToError("[BAC] Error running test case " + tcId + ": "
+                + e.getClass().getSimpleName() + ": " + e.getMessage());
             saveResult(runId, tc, account, null, 0, 0, "", new byte[0], 0.0, ERROR);
         }
     }

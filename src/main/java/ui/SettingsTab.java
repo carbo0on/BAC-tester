@@ -66,45 +66,45 @@ public class SettingsTab extends JPanel {
         form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
 
         // ── Triage ───────────────────────────────────────────────────────
-        form.add(sectionTitle("Triage / Comparison"));
+        CollapsibleSection triage = new CollapsibleSection("Triage / Comparison", "🔍");
 
         thresholdSpinner = new JSpinner(new SpinnerNumberModel(95, 1, 100, 1));
         thresholdSpinner.setPreferredSize(new Dimension(70, thresholdSpinner.getPreferredSize().height));
-        form.add(row("Match threshold (%):", thresholdSpinner,
+        triage.addContent(row("Match threshold (%):", thresholdSpinner,
             "Similarity at/above this value counts as a 'match'. Default: 95"));
 
         reviewBoundSpinner = new JSpinner(new SpinnerNumberModel(60, 0, 100, 1));
         reviewBoundSpinner.setPreferredSize(new Dimension(70, reviewBoundSpinner.getPreferredSize().height));
-        form.add(row("Review lower bound (%):", reviewBoundSpinner,
+        triage.addContent(row("Review lower bound (%):", reviewBoundSpinner,
             "Similarity in [this, threshold) is flagged REVIEW (ambiguous). Default: 60"));
 
         defaultAccessCombo = new JComboBox<>(new String[]{"UNKNOWN", "ALLOWED", "DENIED"});
-        form.add(row("Default expected access (new accounts):", defaultAccessCombo, null));
-
-        form.add(gap(10));
+        triage.addContent(row("Default expected access (new accounts):", defaultAccessCombo, null));
+        form.add(triage);
+        form.add(gap(6));
 
         // ── Run safety ─────────────────────────────────────────────────────
-        form.add(sectionTitle("Run Safety"));
+        CollapsibleSection runSafety = new CollapsibleSection("Run Safety", "🛡");
 
         safeModeCheck = new JCheckBox(
             "Safe Mode — skip DELETE requests during runs (POST / PUT / PATCH are still replayed)");
         safeModeCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(safeModeCheck);
+        runSafety.addContent(safeModeCheck);
 
         confirmRunCheck = new JCheckBox("Ask for confirmation before starting a run");
         confirmRunCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(confirmRunCheck);
+        runSafety.addContent(confirmRunCheck);
 
         scopeCombo = new JComboBox<>(new String[]{"WARN", "BLOCK", "OFF"});
-        form.add(row("Out-of-scope handling:", scopeCombo,
+        runSafety.addContent(row("Out-of-scope handling:", scopeCombo,
             "WARN: log and continue · BLOCK: skip out-of-scope requests · OFF: ignore scope"));
-
-        form.add(gap(10));
+        form.add(runSafety);
+        form.add(gap(6));
 
         // ── Capture ────────────────────────────────────────────────────────
-        form.add(sectionTitle("Capture"));
+        CollapsibleSection capture = new CollapsibleSection("Capture", "⌨");
         hotkeyField = new JTextField(14);
-        form.add(row("Quick-save hotkey:", hotkeyField,
+        capture.addContent(row("Quick-save hotkey:", hotkeyField,
             "Combo used to quick-save the focused request to Inbox. Same format as Burp's "
             + "Settings (e.g. Alt+Q or Ctrl+Alt+A). Use modifiers plus a normal key; avoid the "
             + "Windows/Meta key (the OS reserves it). Takes effect after you reload the extension."));
@@ -112,43 +112,43 @@ public class SettingsTab extends JPanel {
             + "extension (Extensions ▸ toggle the Loaded checkbox).");
         hotkeyHint.setFont(hotkeyHint.getFont().deriveFont(Font.ITALIC, 11f));
         hotkeyHint.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(hotkeyHint);
-
-        form.add(gap(10));
+        capture.addContent(hotkeyHint);
+        form.add(capture);
+        form.add(gap(6));
 
         // ── Appearance ─────────────────────────────────────────────────────
-        form.add(sectionTitle("Appearance"));
+        CollapsibleSection appearance = new CollapsibleSection("Appearance", "🎨");
 
         coloringCombo = new JComboBox<>(new String[]{"AUTO", "MANUAL", "OFF"});
-        form.add(row("Library row coloring:", coloringCombo,
+        appearance.addContent(row("Library row coloring:", coloringCombo,
             "AUTO: color by HTTP method · MANUAL: only your per-request colors · OFF: none"));
 
         fontSizeSpinner = new JSpinner(new SpinnerNumberModel(12, 8, 24, 1));
         fontSizeSpinner.setPreferredSize(new Dimension(60, fontSizeSpinner.getPreferredSize().height));
-        form.add(row("Response viewer font size (px):", fontSizeSpinner, null));
+        appearance.addContent(row("Response viewer font size (px):", fontSizeSpinner, null));
 
         autoExpandCheck = new JCheckBox("Auto-expand all folders in the Library tree");
         autoExpandCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(autoExpandCheck);
-
-        form.add(gap(10));
+        appearance.addContent(autoExpandCheck);
+        form.add(appearance);
+        form.add(gap(6));
 
         // ── Compare ─────────────────────────────────────────────────────────
-        form.add(sectionTitle("Compare"));
+        CollapsibleSection compare = new CollapsibleSection("Compare", "⇄");
 
         diffCapSpinner = new JSpinner(new SpinnerNumberModel(300, 50, 5000, 50));
         diffCapSpinner.setPreferredSize(new Dimension(80, diffCapSpinner.getPreferredSize().height));
-        form.add(row("Max diff size (KB):", diffCapSpinner,
+        compare.addContent(row("Max diff size (KB):", diffCapSpinner,
             "Responses larger than this are truncated in the Compare view for performance."));
-
-        form.add(gap(10));
+        form.add(compare);
+        form.add(gap(6));
 
         // ── Ignore patterns ──────────────────────────────────────────────
-        form.add(sectionTitle("Ignore Patterns"));
+        CollapsibleSection ignore = new CollapsibleSection("Ignore Patterns", "🚫");
         JLabel lbl = new JLabel("Java regex — matching lines are greyed out and excluded from similarity:");
         lbl.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(lbl);
-        form.add(gap(4));
+        ignore.addContent(lbl);
+        ignore.addContent(gap(4));
 
         patternModel = new DefaultListModel<>();
         JList<String> patternList = new JList<>(patternModel);
@@ -157,8 +157,8 @@ public class SettingsTab extends JPanel {
         JScrollPane listScroll = new JScrollPane(patternList);
         listScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
         listScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, 130));
-        form.add(listScroll);
-        form.add(gap(4));
+        ignore.addContent(listScroll);
+        ignore.addContent(gap(4));
 
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         btnRow.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -166,7 +166,7 @@ public class SettingsTab extends JPanel {
         JButton remBtn = new JButton("- Remove selected");
         btnRow.add(addBtn);
         btnRow.add(remBtn);
-        form.add(btnRow);
+        ignore.addContent(btnRow);
 
         addBtn.addActionListener(e -> {
             String regex = JOptionPane.showInputDialog(this,
@@ -186,17 +186,19 @@ public class SettingsTab extends JPanel {
             int idx = patternList.getSelectedIndex();
             if (idx >= 0) patternModel.remove(idx);
         });
+        form.add(ignore);
+        form.add(gap(6));
 
-        form.add(gap(12));
-
-        // ── DB path + Save ─────────────────────────────────────────────────
-        form.add(sectionTitle("Storage"));
+        // ── DB path ────────────────────────────────────────────────────────
+        CollapsibleSection storage = new CollapsibleSection("Storage", "💾");
         dbPathLabel = new JLabel("—");
         dbPathLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        form.add(row("Database path:", dbPathLabel, null));
+        storage.addContent(row("Database path:", dbPathLabel, null));
+        form.add(storage);
 
+        // ── Save (always visible, never inside a collapsible section) ───────
         form.add(gap(12));
-        JButton saveBtn = new JButton("Save Settings");
+        JButton saveBtn = new JButton("💾 Save Settings");
         saveBtn.setFont(saveBtn.getFont().deriveFont(Font.BOLD));
         saveBtn.addActionListener(e -> saveSettings());
         JPanel savePan = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -212,7 +214,7 @@ public class SettingsTab extends JPanel {
         form.add(gap(12));
 
         // ── Export / Import ──────────────────────────────────────────────
-        form.add(sectionTitle("Library Export / Import"));
+        CollapsibleSection io = new CollapsibleSection("Library Export / Import", "📦");
         for (String line : new String[]{
                 "Export saves folders + test cases + all versioned baselines to a portable .bac.json bundle.",
                 "Import reads one or more .bac.json files, rebuilds the folder tree, and merges test cases",
@@ -220,17 +222,17 @@ public class SettingsTab extends JPanel {
             JLabel ioHint = new JLabel(line);
             ioHint.setFont(ioHint.getFont().deriveFont(Font.ITALIC, 11f));
             ioHint.setAlignmentX(Component.LEFT_ALIGNMENT);
-            form.add(ioHint);
+            io.addContent(ioHint);
         }
-        form.add(gap(6));
+        io.addContent(gap(6));
 
         dedupCheck = new JCheckBox("Skip duplicates on import (host + method + URL + request hash)");
         dedupCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
-        form.add(dedupCheck);
-        form.add(gap(8));
+        io.addContent(dedupCheck);
+        io.addContent(gap(8));
 
-        JButton exportBtn = new JButton("Export Library…");
-        JButton importBtn = new JButton("Import Library…");
+        JButton exportBtn = new JButton("⤓ Export Library…");
+        JButton importBtn = new JButton("⤒ Import Library…");
         exportBtn.addActionListener(e -> exportImport.showExportDialog(this));
         importBtn.addActionListener(e -> exportImport.showImportDialog(this, count -> {
             if (onSaved != null) onSaved.run(); // refresh library after import
@@ -240,7 +242,8 @@ public class SettingsTab extends JPanel {
         ioPan.setAlignmentX(Component.LEFT_ALIGNMENT);
         ioPan.add(exportBtn);
         ioPan.add(importBtn);
-        form.add(ioPan);
+        io.addContent(ioPan);
+        form.add(io);
 
         JScrollPane scroll = new JScrollPane(form);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
@@ -360,14 +363,6 @@ public class SettingsTab extends JPanel {
         try { spinner.setValue(Integer.parseInt(val.trim())); } catch (Exception ignored) {}
     }
 
-    private JLabel sectionTitle(String text) {
-        JLabel l = new JLabel(text);
-        l.setFont(l.getFont().deriveFont(Font.BOLD, 13f));
-        l.setAlignmentX(Component.LEFT_ALIGNMENT);
-        l.setBorder(BorderFactory.createEmptyBorder(2, 0, 4, 0));
-        return l;
-    }
-
     private static JPanel row(String label, JComponent control, String tooltip) {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         p.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -379,4 +374,66 @@ public class SettingsTab extends JPanel {
     }
 
     private static Component gap(int h) { return Box.createVerticalStrut(h); }
+
+    // ── Collapsible section ───────────────────────────────────────────────
+
+    /**
+     * A titled section with a clickable header (▾ expanded / ▸ collapsed) that
+     * folds its content away so users can hide settings groups they don't need.
+     */
+    private static final class CollapsibleSection extends JPanel {
+        private final JPanel content = new JPanel();
+        private final JButton header = new JButton();
+        private final String title;
+        private boolean expanded = true;
+
+        CollapsibleSection(String title, String emoji) {
+            this.title = (emoji != null && !emoji.isBlank() ? emoji + "  " : "") + title;
+            setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+            setAlignmentX(Component.LEFT_ALIGNMENT);
+
+            content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+            content.setAlignmentX(Component.LEFT_ALIGNMENT);
+            content.setBorder(BorderFactory.createEmptyBorder(4, 18, 6, 0));
+
+            header.setHorizontalAlignment(SwingConstants.LEFT);
+            header.setBorderPainted(false);
+            header.setContentAreaFilled(false);
+            header.setFocusPainted(false);
+            header.setOpaque(false);
+            header.setMargin(new Insets(3, 0, 3, 0));
+            header.setAlignmentX(Component.LEFT_ALIGNMENT);
+            header.setFont(header.getFont().deriveFont(Font.BOLD, 13f));
+            header.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            header.setToolTipText("Click to collapse / expand this section");
+            header.addActionListener(e -> setExpanded(!expanded));
+
+            add(header);
+            add(content);
+            updateHeader();
+        }
+
+        /** Add a control (or a gap component) to this section's body. */
+        void addContent(Component c) {
+            if (c instanceof JComponent jc) jc.setAlignmentX(Component.LEFT_ALIGNMENT);
+            content.add(c);
+        }
+
+        private void setExpanded(boolean e) {
+            expanded = e;
+            content.setVisible(e);
+            updateHeader();
+            revalidate();
+            repaint();
+        }
+
+        private void updateHeader() {
+            header.setText((expanded ? "▾  " : "▸  ") + title);
+        }
+
+        // Keep the section compact under BoxLayout (don't stretch vertically).
+        @Override public Dimension getMaximumSize() {
+            return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+        }
+    }
 }

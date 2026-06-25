@@ -889,7 +889,7 @@ public class AccountsTab extends JPanel {
             super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, focus);
             Object o = (value instanceof DefaultMutableTreeNode n) ? n.getUserObject() : null;
             if (o instanceof AccountRecord a) {
-                setText(a.id() + ":" + a.name());
+                setText("👤 " + a.id() + ":" + a.name());
                 setIcon(UIManager.getIcon("FileView.fileIcon"));
                 String access = a.expectedAccess() != null ? a.expectedAccess() : "UNKNOWN";
                 String role = a.roleDesc();

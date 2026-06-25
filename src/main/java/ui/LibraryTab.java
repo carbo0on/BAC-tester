@@ -1127,7 +1127,7 @@ public class LibraryTab extends JPanel {
             return switch (col) {
                 case 0 -> dangerIcon(r.method());
                 case 1 -> r.method();
-                case 2 -> r.name() != null ? r.name() : autoLabel(r);
+                case 2 -> "📄 " + (r.name() != null ? r.name() : autoLabel(r));
                 case 3 -> r.host();
                 case 4 -> extractPath(r.url());
                 case 5 -> r.primaryBaselineStatus() != null ? String.valueOf(r.primaryBaselineStatus()) : "—";

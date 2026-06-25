@@ -52,11 +52,11 @@ public class MainTab {
         settingsTab.setOnSaved(() -> libraryTab.refresh());
 
         tabbedPane = new JTabbedPane();
-        tabbedPane.addTab("Library",  libraryTab);
-        tabbedPane.addTab("Accounts", accountsTab);
-        tabbedPane.addTab("Test Run", testRunTab);
-        tabbedPane.addTab("Compare",  compareTab);
-        tabbedPane.addTab("Settings", settingsTab);
+        tabbedPane.addTab("📚  Library",  libraryTab);
+        tabbedPane.addTab("👤  Accounts", accountsTab);
+        tabbedPane.addTab("▶  Test Run", testRunTab);
+        tabbedPane.addTab("⇄  Compare",  compareTab);
+        tabbedPane.addTab("⚙  Settings", settingsTab);
 
         // Wire Library → Compare (after tabbedPane is ready)
         libraryTab.setAccountRepository(accountRepo);

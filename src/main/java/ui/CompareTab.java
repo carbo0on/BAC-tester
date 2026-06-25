@@ -58,6 +58,8 @@ public class CompareTab extends JPanel {
     private int rightIdx = 0;
     private long currentResultId = -1; // id of the result currently in the RIGHT pane (for review)
     private boolean currentReviewed = false;
+    /** Monotonic token so a slow background render can't overwrite a newer one. */
+    private volatile int renderToken = 0;
 
     // ---- UI -----------------------------------------------------------
 
@@ -290,55 +292,66 @@ public class CompareTab extends JPanel {
         leftIdx  = Math.min(leftIdx,  responses.size() - 1);
         rightIdx = Math.min(rightIdx, responses.size() - 1);
 
-        ResponseEntry left  = responses.get(leftIdx);
-        ResponseEntry right = responses.get(rightIdx);
+        final ResponseEntry left  = responses.get(leftIdx);
+        final ResponseEntry right = responses.get(rightIdx);
 
-        byte[] leftRaw  = left.raw()  != null ? left.raw()  : new byte[0];
-        byte[] rightRaw = right.raw() != null ? right.raw() : new byte[0];
+        final byte[] leftRaw  = left.raw()  != null ? left.raw()  : new byte[0];
+        final byte[] rightRaw = right.raw() != null ? right.raw() : new byte[0];
+        final boolean norm = normalized;
+        final List<Pattern> ip = ignorePatterns;
+        final int fs = fontSize;
+        final long resultId = right.isBaseline() ? -1 : right.id();
+        final int token = ++renderToken;
 
-        // Determine result id for review button
-        currentResultId = right.isBaseline() ? -1 : right.id();
-        currentReviewed = false;
-        if (currentResultId > 0) {
-            try {
-                synchronized (dbManager) {
-                    String sql = "SELECT reviewed FROM results WHERE id = ?";
-                    try (PreparedStatement ps = dbManager.getConnection().prepareStatement(sql)) {
-                        ps.setLong(1, currentResultId);
-                        try (var rs = ps.executeQuery()) {
-                            if (rs.next()) currentReviewed = rs.getInt(1) == 1;
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-
-        // Show each response in a Burp-native read-only editor (syntax coloring,
-        // search, and the full right-click context menu).
+        // The Burp-native editors and pane titles are cheap to update — do them
+        // on the EDT immediately so the panes never appear stale. The review
+        // target is also set now so a fast click can't act on a stale result.
         setEditorResponse(leftEditor,  leftRaw);
         setEditorResponse(rightEditor, rightRaw);
-
-        // Render the highlighted diff (raw or normalized).
-        DiffUtil.SideBySideDiff diff = normalized
-            ? DiffUtil.computeNormalized(leftRaw, rightRaw, ignorePatterns)
-            : DiffUtil.compute(leftRaw, rightRaw);
-        if (diffView != null) {
-            diffView.setFontSize(fontSize);
-            diffView.render(diff);
-        }
-
         updateTitles(left, right);
-
-        // Similarity is computed consistently with the engine: JSON-aware and,
-        // in normalized mode, with ignore-patterns stripped.
-        double sim = RunEngine.computeSimilarity(leftRaw, rightRaw,
-            normalized ? ignorePatterns : Collections.emptyList());
-        updateSummary(left, right, sim);
-
+        currentResultId = resultId;
+        reviewedBtn.setEnabled(resultId > 0);
         if (requestShown) loadRequestForCurrentTc();
 
-        reviewedBtn.setEnabled(currentResultId > 0);
-        reviewedBtn.setText(currentReviewed ? "✓ Reviewed" : "Mark Reviewed");
+        // The expensive work — the reviewed lookup (a DB round-trip), the
+        // line-level diff and the similarity score over bodies up to 200 KB —
+        // must NOT run on the EDT or it freezes the UI while paging with ↑/↓.
+        loader.submit(() -> {
+            boolean reviewed = false;
+            if (resultId > 0) {
+                try {
+                    synchronized (dbManager) {
+                        String sql = "SELECT reviewed FROM results WHERE id = ?";
+                        try (PreparedStatement ps = dbManager.getConnection().prepareStatement(sql)) {
+                            ps.setLong(1, resultId);
+                            try (var rs = ps.executeQuery()) {
+                                if (rs.next()) reviewed = rs.getInt(1) == 1;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            final DiffUtil.SideBySideDiff diff = norm
+                ? DiffUtil.computeNormalized(leftRaw, rightRaw, ip)
+                : DiffUtil.compute(leftRaw, rightRaw);
+            // Similarity is computed consistently with the engine: JSON-aware and,
+            // in normalized mode, with ignore-patterns stripped.
+            final double sim = RunEngine.computeSimilarity(leftRaw, rightRaw,
+                norm ? ip : Collections.emptyList());
+            final boolean fReviewed = reviewed;
+
+            SwingUtilities.invokeLater(() -> {
+                if (token != renderToken) return; // a newer render superseded this one
+                currentReviewed = fReviewed;
+                if (diffView != null) {
+                    diffView.setFontSize(fs);
+                    diffView.render(diff);
+                }
+                updateSummary(left, right, sim);
+                reviewedBtn.setText(currentReviewed ? "✓ Reviewed" : "Mark Reviewed");
+            });
+        });
     }
 
     private void updateTitles(ResponseEntry left, ResponseEntry right) {
@@ -416,17 +429,18 @@ public class CompareTab extends JPanel {
         JPanel top = new JPanel(new BorderLayout(0, 2));
         top.setBorder(BorderFactory.createEmptyBorder(6, 8, 4, 8));
 
-        // Nav bar
-        JPanel nav = new JPanel(new BorderLayout(6, 0));
+        // ── Row 1 (slim): nav · test-case name · summary badges ────────────
+        JPanel nav = new JPanel(new BorderLayout(8, 0));
         JButton prevBtn = new JButton("◀");
         JButton nextBtn = new JButton("▶");
         prevBtn.setPreferredSize(new Dimension(36, 24));
         nextBtn.setPreferredSize(new Dimension(36, 24));
+        prevBtn.setToolTipText("Previous test case (↑)");
+        nextBtn.setToolTipText("Next test case (↓)");
         navLabel    = new JLabel("0 / 0", SwingConstants.CENTER);
         tcNameLabel = new JLabel("", SwingConstants.LEFT);
         tcNameLabel.setFont(tcNameLabel.getFont().deriveFont(Font.BOLD, 12f));
-
-        navLabel.setPreferredSize(new Dimension(80, 24));
+        navLabel.setPreferredSize(new Dimension(70, 24));
 
         prevBtn.addActionListener(e -> navigatePrev());
         nextBtn.addActionListener(e -> navigateNext());
@@ -435,18 +449,23 @@ public class CompareTab extends JPanel {
         navButtons.add(prevBtn);
         navButtons.add(navLabel);
         navButtons.add(nextBtn);
-        navButtons.add(tcNameLabel);
 
-        nav.add(navButtons, BorderLayout.WEST);
+        summaryLabel = new JLabel("", SwingConstants.RIGHT);
+        summaryLabel.setFont(summaryLabel.getFont().deriveFont(11f));
+
+        nav.add(navButtons,  BorderLayout.WEST);
+        nav.add(tcNameLabel, BorderLayout.CENTER);
+        nav.add(summaryLabel, BorderLayout.EAST);
         top.add(nav, BorderLayout.NORTH);
 
-        // Header row: OLD selector | summary | NEW selector
+        // ── Row 2: OLD selector | session chips | NEW selector ─────────────
         JPanel header = new JPanel(new BorderLayout(8, 0));
+        header.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
 
         JPanel leftSel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         leftSel.add(new JLabel("OLD:"));
         leftCombo = new JComboBox<>();
-        leftCombo.setPreferredSize(new Dimension(260, 24));
+        leftCombo.setPreferredSize(new Dimension(240, 24));
         leftCombo.addActionListener(e -> {
             leftIdx = leftCombo.getSelectedIndex();
             if (leftIdx >= 0) renderPanes();
@@ -454,27 +473,22 @@ public class CompareTab extends JPanel {
         leftSel.add(leftCombo);
 
         JPanel rightSel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
-        rightSel.add(new JLabel("NEW:"));
         rightCombo = new JComboBox<>();
-        rightCombo.setPreferredSize(new Dimension(260, 24));
+        rightCombo.setPreferredSize(new Dimension(240, 24));
         rightCombo.addActionListener(e -> {
             rightIdx = rightCombo.getSelectedIndex();
             if (rightIdx >= 0) renderPanes();
         });
+        rightSel.add(new JLabel("NEW:"));
         rightSel.add(rightCombo);
 
-        summaryLabel = new JLabel("", SwingConstants.CENTER);
-        summaryLabel.setFont(summaryLabel.getFont().deriveFont(11f));
+        // Session chips live between the two selectors so they stay on one line.
+        sessionChipsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 0));
 
-        header.add(leftSel,     BorderLayout.WEST);
-        header.add(summaryLabel, BorderLayout.CENTER);
-        header.add(rightSel,    BorderLayout.EAST);
+        header.add(leftSel,  BorderLayout.WEST);
+        header.add(sessionChipsPanel, BorderLayout.CENTER);
+        header.add(rightSel, BorderLayout.EAST);
         top.add(header, BorderLayout.CENTER);
-
-        // Session chips
-        sessionChipsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        sessionChipsPanel.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
-        top.add(sessionChipsPanel, BorderLayout.SOUTH);
 
         api.userInterface().applyThemeToComponent(top);
         api.userInterface().applyThemeToComponent(nav);
@@ -652,6 +666,12 @@ public class CompareTab extends JPanel {
         noteField.addActionListener(e -> saveNote());
         bar.add(new JLabel("Note:"));
         bar.add(noteField);
+
+        // Keyboard-navigation hint (muted) so the arrow-key workflow is discoverable.
+        JLabel hint = new JLabel("   ↑/↓ test cases · ←/→ responses · Tab/click switches pane");
+        hint.setFont(hint.getFont().deriveFont(Font.ITALIC, 10.5f));
+        hint.setForeground(UIManager.getColor("Label.disabledForeground"));
+        bar.add(hint);
 
         api.userInterface().applyThemeToComponent(bar);
         return bar;

@@ -52,11 +52,17 @@ public class MainTab {
         settingsTab.setOnSaved(() -> libraryTab.refresh());
 
         tabbedPane = new JTabbedPane();
-        tabbedPane.addTab("📚  Library",  libraryTab);
-        tabbedPane.addTab("👤  Accounts", accountsTab);
-        tabbedPane.addTab("▶  Test Run", testRunTab);
-        tabbedPane.addTab("⇄  Compare",  compareTab);
-        tabbedPane.addTab("⚙  Settings", settingsTab);
+        tabbedPane.addTab("Library",  libraryTab);
+        tabbedPane.addTab("Accounts", accountsTab);
+        tabbedPane.addTab("Test Run", testRunTab);
+        tabbedPane.addTab("Compare",  compareTab);
+        tabbedPane.addTab("Settings", settingsTab);
+        // Crisp vector icons instead of emoji (consistent across platforms/themes).
+        tabbedPane.setIconAt(TAB_LIBRARY,  BacIcons.folder(new Color(0x5F, 0x96, 0xE0)));
+        tabbedPane.setIconAt(TAB_ACCOUNTS, BacIcons.account());
+        tabbedPane.setIconAt(TAB_TESTRUN,  BacIcons.dot(new Color(0x20, 0x90, 0x20)));
+        tabbedPane.setIconAt(TAB_COMPARE,  BacIcons.dot(new Color(0x5F, 0x96, 0xE0)));
+        tabbedPane.setIconAt(4,            BacIcons.dot(new Color(0x88, 0x88, 0x88)));
 
         // Wire Library → Compare (after tabbedPane is ready)
         libraryTab.setAccountRepository(accountRepo);

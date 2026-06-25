@@ -55,12 +55,21 @@ public class RunEngine {
     private volatile BiConsumer<Long, String> onFinished;
 
     private volatile boolean running = false;
+    /** Set by {@link #requestStop()}; the run loop checks it between requests. */
+    private volatile boolean cancelRequested = false;
 
     // Loaded from settings at the start of each run
     private volatile double greyLowerBound = 60.0;
     private volatile String scopeEnforcement = "WARN"; // WARN / BLOCK / OFF
     private volatile String safeModeScope = "DELETE";  // DELETE (lenient) / ALL (strict)
+    private volatile int    runThreads = 1;            // concurrent in-flight requests (1–16)
+    private volatile long   runDelayMs = 0;            // throttle: delay before each request
+    private volatile boolean detectLoginBody = true;   // treat a 200 login page as expired session
     private volatile List<Pattern> ignorePatterns = new ArrayList<>();
+
+    /** Matches a login form in a 200 response body (strong "session expired" signal). */
+    private static final Pattern LOGIN_BODY =
+        Pattern.compile("(?i)<input[^>]+type=[\"']?password");
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
@@ -84,6 +93,14 @@ public class RunEngine {
     public boolean isRunning() { return running; }
 
     /**
+     * Requests cancellation of the in-flight run. The loop stops issuing new
+     * requests after the current one returns; already-stored results are kept.
+     */
+    public void requestStop() { cancelRequested = true; }
+
+    public boolean isStopRequested() { return cancelRequested; }
+
+    /**
      * Start a run asynchronously.
      * @param accountId  account whose auth material replaces the original
      * @param testCaseIds ordered list of test case IDs to run
@@ -94,9 +111,11 @@ public class RunEngine {
                          boolean safeMode, double matchThreshold) {
         if (running) return;
         running = true;
+        cancelRequested = false;
         loadRunSettings();
         executor.submit(() -> {
             long runId = -1;
+            ExecutorService pool = null;
             try {
                 AccountRepository.AccountRecord account = accountRepo.getById(accountId)
                     .orElseThrow(() -> new IllegalArgumentException("Account not found: " + accountId));
@@ -111,12 +130,40 @@ public class RunEngine {
                     return;
                 }
 
-                // --- Iterate test cases ---
-                int done = 0;
-                for (long tcId : testCaseIds) {
-                    processOne(runId, tcId, account, safeMode, matchThreshold);
-                    done++;
-                    fireProgress(done, testCaseIds.size());
+                // --- Iterate test cases (sequentially or across a worker pool) ---
+                final long fRunId = runId;
+                final int total = testCaseIds.size();
+                final java.util.concurrent.atomic.AtomicInteger done =
+                    new java.util.concurrent.atomic.AtomicInteger();
+                int threads = Math.max(1, Math.min(runThreads, 16));
+
+                if (threads == 1) {
+                    for (long tcId : testCaseIds) {
+                        if (cancelRequested) break;
+                        throttle();
+                        processOne(fRunId, tcId, account, safeMode, matchThreshold);
+                        fireProgress(done.incrementAndGet(), total);
+                    }
+                } else {
+                    pool = Executors.newFixedThreadPool(threads, workerFactory());
+                    for (long tcId : testCaseIds) {
+                        final long id = tcId;
+                        pool.submit(() -> {
+                            if (cancelRequested) return;
+                            try {
+                                throttle();
+                                processOne(fRunId, id, account, safeMode, matchThreshold);
+                            } catch (Exception ex) {
+                                api.logging().logToError("[BAC] Run worker TC " + id + ": " + ex.getMessage());
+                            } finally {
+                                fireProgress(done.incrementAndGet(), total);
+                            }
+                        });
+                    }
+                    pool.shutdown();
+                    while (!pool.awaitTermination(200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        if (cancelRequested) { pool.shutdownNow(); break; }
+                    }
                 }
 
                 runRepo.finishRun(runId);
@@ -127,9 +174,27 @@ public class RunEngine {
                 try { if (runId > 0) runRepo.finishRun(runId); } catch (Exception ignored) {}
                 fireFinished(runId, "Run failed: " + e.getMessage());
             } finally {
+                if (pool != null && !pool.isShutdown()) pool.shutdownNow();
                 running = false;
             }
         });
+    }
+
+    /** Sleeps the configured throttle delay (no-op when 0). */
+    private void throttle() {
+        long d = runDelayMs;
+        if (d > 0) {
+            try { Thread.sleep(d); }
+            catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        }
+    }
+
+    private static java.util.concurrent.ThreadFactory workerFactory() {
+        return r -> {
+            Thread t = new Thread(r, "bac-run-worker");
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     private void loadRunSettings() {
@@ -144,6 +209,18 @@ public class RunEngine {
         try {
             String sms = dbManager.getSetting("safe_mode_scope");
             if (sms != null && !sms.isBlank()) safeModeScope = sms.trim().toUpperCase();
+        } catch (Exception ignored) {}
+        try {
+            String t = dbManager.getSetting("run_threads");
+            if (t != null && !t.isBlank()) runThreads = Integer.parseInt(t.trim());
+        } catch (Exception ignored) {}
+        try {
+            String d = dbManager.getSetting("run_delay_ms");
+            if (d != null && !d.isBlank()) runDelayMs = Long.parseLong(d.trim());
+        } catch (Exception ignored) {}
+        try {
+            String lb = dbManager.getSetting("canary_detect_login_body");
+            if (lb != null) detectLoginBody = !"false".equalsIgnoreCase(lb.trim());
         } catch (Exception ignored) {}
         ignorePatterns = loadIgnorePatterns(dbManager);
     }
@@ -182,7 +259,7 @@ public class RunEngine {
             if (req == null) return true;
             var resp = api.http().sendRequest(req);
             if (resp.response() == null) return false; // unreachable — don't emit false results
-            return !isSessionDead(resp.response());
+            return !isSessionDead(resp.response(), detectLoginBody);
         } catch (Exception e) {
             api.logging().logToError("[BAC] Canary check error: " + e.getMessage());
             return false;
@@ -196,6 +273,15 @@ public class RunEngine {
      * sessions, so legitimate non-2xx canary endpoints don't abort the run.
      */
     public static boolean isSessionDead(HttpResponse response) {
+        return isSessionDead(response, false);
+    }
+
+    /**
+     * As above, but when {@code detectLoginBody} is set a {@code 200} response
+     * whose body contains a login form (password input) is also treated as an
+     * expired session — many apps serve a 200 login page instead of a 401/redirect.
+     */
+    public static boolean isSessionDead(HttpResponse response, boolean detectLoginBody) {
         int status = response.statusCode();
         if (status == 401 || status == 403) return true;
         if (status >= 300 && status < 400) {
@@ -204,6 +290,12 @@ public class RunEngine {
                     .matcher(loc).find()) {
                 return true;
             }
+        }
+        if (detectLoginBody && status == 200) {
+            try {
+                String body = response.bodyToString();
+                if (body != null && LOGIN_BODY.matcher(body).find()) return true;
+            } catch (Exception ignored) {}
         }
         return false;
     }

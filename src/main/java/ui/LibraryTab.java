@@ -377,9 +377,17 @@ public class LibraryTab extends JPanel {
 
         statusLabel.setText("  Searching…");
         final List<TestCaseRow> candidates = new ArrayList<>(allRows);
+        final int totalToScan = candidates.size();
         loader.submit(() -> {
             List<TestCaseRow> matches = new ArrayList<>();
+            int scanned = 0;
             for (TestCaseRow r : candidates) {
+                scanned++;
+                if (scanned % 25 == 0 || scanned == totalToScan) {
+                    final int s = scanned;
+                    SwingUtilities.invokeLater(() ->
+                        statusLabel.setText("  Searching… " + s + " / " + totalToScan));
+                }
                 try {
                     boolean hit = false;
                     if (inReq) {
@@ -918,7 +926,12 @@ public class LibraryTab extends JPanel {
     private void rebaselineAsync(long[] tcIds) {
         loader.submit(() -> {
             int done = 0, errors = 0;
-            for (long tcId : tcIds) {
+            final int n = tcIds.length;
+            for (int i = 0; i < n; i++) {
+                long tcId = tcIds[i];
+                final int idx = i + 1;
+                SwingUtilities.invokeLater(() ->
+                    statusLabel.setText("  Re-baselining " + idx + " / " + n + "…"));
                 try {
                     TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
                     if (tc == null || tc.ownerAccountId() == null || accountRepo == null) { errors++; continue; }
@@ -932,6 +945,14 @@ public class LibraryTab extends JPanel {
                     HttpRequest req = buildOwnerRequest(reqRaw, owner, service, dyn);
                     if (req == null) { errors++; continue; }
                     var resp = api.http().sendRequest(req);
+                    // Guard against an unreachable / out-of-scope target: response()
+                    // may be null, which would otherwise NPE inside this loop.
+                    if (resp.response() == null) {
+                        api.logging().logToError("[BAC] Re-baseline TC " + tcId
+                            + ": no response (target unreachable / out of scope).");
+                        errors++;
+                        continue;
+                    }
                     byte[] respRaw = resp.response().toByteArray().getBytes();
                     int status = resp.response().statusCode();
                     int length = resp.response().body().length();
@@ -1204,9 +1225,9 @@ public class LibraryTab extends JPanel {
         @Override public Object getValueAt(int row, int col) {
             TestCaseRow r = rows.get(row);
             return switch (col) {
-                case 0 -> dangerIcon(r.method());
+                case 0 -> "";   // danger badge drawn as a vector icon by the renderer
                 case 1 -> r.method();
-                case 2 -> "📄 " + (r.name() != null ? r.name() : autoLabel(r));
+                case 2 -> r.name() != null ? r.name() : autoLabel(r);
                 case 3 -> r.host();
                 case 4 -> extractPath(r.url());
                 case 5 -> r.primaryBaselineStatus() != null ? String.valueOf(r.primaryBaselineStatus()) : "—";
@@ -1214,16 +1235,6 @@ public class LibraryTab extends JPanel {
                 case 7 -> r.notes() != null ? r.notes().replaceAll("\\s+", " ").trim() : "";
                 case 8 -> DATE_FMT.format(Instant.ofEpochSecond(r.capturedAt()));
                 default -> "";
-            };
-        }
-
-        private static String dangerIcon(String method) {
-            if (method == null) return "";
-            return switch (method.toUpperCase()) {
-                case "DELETE"       -> "🔴";
-                case "PUT", "PATCH" -> "🟠";
-                case "POST"         -> "🟡";
-                default             -> "";
             };
         }
 
@@ -1271,8 +1282,24 @@ public class LibraryTab extends JPanel {
             Component c = super.getTableCellRendererComponent(t, value, selected, focus, row, col);
             if (c instanceof JLabel lbl) {
                 lbl.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+                TestCaseRow rowData = tableModel.getRow(row);
+
+                // Column 0 = danger badge: a crisp vector dot (red/orange/yellow)
+                // for state-changing methods, nothing for safe ones.
+                int modelCol = t.convertColumnIndexToModel(col);
+                if (modelCol == 0) {
+                    Icon d = BacIcons.dangerDot(rowData.method());
+                    lbl.setIcon(d);
+                    lbl.setText("");
+                    lbl.setHorizontalAlignment(SwingConstants.CENTER);
+                    if (d != null) lbl.setToolTipText("State-changing request (" + rowData.method() + ")");
+                } else {
+                    lbl.setIcon(null);
+                    lbl.setHorizontalAlignment(SwingConstants.LEADING);
+                    lbl.setToolTipText(null);
+                }
+
                 if (!selected) {
-                    TestCaseRow rowData = tableModel.getRow(row);
                     Color bg = rowBackground(rowData);
                     lbl.setBackground(bg != null ? blend(t.getBackground(), bg) : t.getBackground());
                     lbl.setOpaque(true);

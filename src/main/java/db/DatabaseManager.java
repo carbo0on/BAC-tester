@@ -234,6 +234,7 @@ public class DatabaseManager {
                 // JSON array of Java regex strings: timestamps, CSRF tokens, nonces
                 {"ignore_patterns",  "[\"\\\\d{10,13}\",\"csrf[_-]?token=[^&\\\\s]+\",\"nonce=[^&\\\\s]+\"]"},
                 {"safe_mode",        "true"},
+                {"safe_mode_scope",  "DELETE"},   // DELETE (lenient) / ALL (strict: skip all state-changing)
                 {"font_size",        "12"},
                 {"hotkey_combo",     "Alt+Q"},   // quick-save (configurable in Settings)
                 // Phase 7.1 additions

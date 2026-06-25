@@ -329,6 +329,32 @@ public class TestCaseRepository {
         }
     }
 
+    /** Returns the dynamic_fields JSON for a test case (null if none). */
+    public String getDynamicFields(long id) throws SQLException {
+        synchronized (db) {
+            String sql = "SELECT dynamic_fields FROM test_cases WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setLong(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getString("dynamic_fields") : null;
+                }
+            }
+        }
+    }
+
+    /** Stores (or clears with null) the dynamic_fields JSON for a test case. */
+    public void setDynamicFields(long id, String json) throws SQLException {
+        synchronized (db) {
+            String sql = "UPDATE test_cases SET dynamic_fields = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, json);
+                ps.setLong(2, Instant.now().getEpochSecond());
+                ps.setLong(3, id);
+                ps.executeUpdate();
+            }
+        }
+    }
+
     public String getNotes(long id) throws SQLException {
         synchronized (db) {
             String sql = "SELECT notes FROM test_cases WHERE id = ?";

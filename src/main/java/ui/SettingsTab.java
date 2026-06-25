@@ -33,6 +33,7 @@ public class SettingsTab extends JPanel {
     private JSpinner thresholdSpinner;
     private JSpinner reviewBoundSpinner;
     private JCheckBox safeModeCheck;
+    private JComboBox<String> safeModeScopeCombo;
     private JSpinner fontSizeSpinner;
     private JSpinner diffCapSpinner;
     private JComboBox<String> coloringCombo;
@@ -87,9 +88,14 @@ public class SettingsTab extends JPanel {
         CollapsibleSection runSafety = new CollapsibleSection("Run Safety", "🛡");
 
         safeModeCheck = new JCheckBox(
-            "Safe Mode — skip DELETE requests during runs (POST / PUT / PATCH are still replayed)");
+            "Safe Mode — skip destructive requests during runs so a replay can't mutate target data");
         safeModeCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
         runSafety.addContent(safeModeCheck);
+
+        safeModeScopeCombo = new JComboBox<>(new String[]{"DELETE", "ALL"});
+        runSafety.addContent(row("Safe Mode skips:", safeModeScopeCombo,
+            "DELETE: skip only DELETE (POST/PUT/PATCH still replayed) · "
+            + "ALL: skip every state-changing request (POST/PUT/PATCH/DELETE)"));
 
         confirmRunCheck = new JCheckBox("Ask for confirmation before starting a run");
         confirmRunCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -258,6 +264,7 @@ public class SettingsTab extends JPanel {
                 String threshold   = db.getSetting("match_threshold");
                 String reviewBound = db.getSetting("review_lower_bound");
                 String safeMode    = db.getSetting("safe_mode");
+                String safeScope   = db.getSetting("safe_mode_scope");
                 String fontSize    = db.getSetting("font_size");
                 String diffCap     = db.getSetting("diff_size_cap_kb");
                 String coloring    = db.getSetting("coloring_mode");
@@ -276,6 +283,7 @@ public class SettingsTab extends JPanel {
                     setSpinner(fontSizeSpinner, fontSize);
                     setSpinner(diffCapSpinner, diffCap);
                     safeModeCheck.setSelected(!"false".equalsIgnoreCase(safeMode));
+                    if (safeScope != null) safeModeScopeCombo.setSelectedItem(safeScope.trim().toUpperCase());
                     autoExpandCheck.setSelected(!"false".equalsIgnoreCase(autoExpand));
                     confirmRunCheck.setSelected(!"false".equalsIgnoreCase(confirmRun));
                     dedupCheckSetSelected(dedup);
@@ -314,6 +322,7 @@ public class SettingsTab extends JPanel {
             return;
         }
         boolean safeMode   = safeModeCheck.isSelected();
+        String safeScope   = (String) safeModeScopeCombo.getSelectedItem();
         int fontSize       = (Integer) fontSizeSpinner.getValue();
         int diffCap        = (Integer) diffCapSpinner.getValue();
         String coloring    = (String) coloringCombo.getSelectedItem();
@@ -333,6 +342,7 @@ public class SettingsTab extends JPanel {
                 db.setSetting("match_threshold", String.valueOf(threshold));
                 db.setSetting("review_lower_bound", String.valueOf(reviewBound));
                 db.setSetting("safe_mode", String.valueOf(safeMode));
+                db.setSetting("safe_mode_scope", safeScope != null ? safeScope : "DELETE");
                 db.setSetting("font_size", String.valueOf(fontSize));
                 db.setSetting("diff_size_cap_kb", String.valueOf(diffCap));
                 db.setSetting("coloring_mode", coloring);

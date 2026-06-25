@@ -2,8 +2,10 @@ package ui;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.ui.editor.EditorOptions;
+import burp.api.montoya.ui.editor.HttpRequestEditor;
 import burp.api.montoya.ui.editor.HttpResponseEditor;
 import db.*;
 import engine.DiffUtil;
@@ -23,9 +25,17 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
- * Phase 5 — Compare tab: side-by-side response comparison with keyboard navigation,
- * muted diff highlighting, synchronized scroll, normalized/raw toggle, and
- * Send-to-Comparer integration.
+ * Compare tab — side-by-side response comparison (the centrepiece, spec §5.4).
+ *
+ * Implemented here: a custom side-by-side {@link DiffView} with muted diff
+ * highlighting, vertical scroll synchronized between the panes, prev/next jump
+ * between changes, a normalized↔raw toggle (ignored lines greyed/struck and
+ * excluded from similarity), an "Identical" banner, plus an optional toggle to
+ * the Burp-native editors (syntax colouring, search, right-click). Keyboard
+ * navigation: ↑/↓ move through the working set, ←/→ cycle the focused pane's
+ * response, Tab/click switches the focused pane. A collapsible "Show request"
+ * strip reveals the captured request, and Send-to-Comparer hands both responses
+ * to Burp Comparer.
  */
 public class CompareTab extends JPanel {
 
@@ -61,6 +71,26 @@ public class CompareTab extends JPanel {
     private HttpResponseEditor leftEditor, rightEditor;  // Burp-native: syntax coloring + right-click
     private JButton reviewedBtn;
     private JTextField noteField;
+
+    // Diff view + view-mode switching (diff highlight vs native editors)
+    private DiffView diffView;
+    private JPanel centerCards;
+    private final CardLayout centerLayout = new CardLayout();
+    private boolean diffMode = true;
+
+    // Normalized (ignore-patterns) vs raw rendering
+    private boolean normalized = false;
+    private List<Pattern> ignorePatterns = new ArrayList<>();
+    private int fontSize = 12;
+
+    // Focused pane (for ←/→ response cycling)
+    private boolean focusedLeft = true;
+
+    // Collapsible request strip
+    private HttpRequestEditor requestEditor;
+    private JPanel requestStrip;
+    private JButton showRequestBtn;
+    private boolean requestShown = false;
 
     // ---- Data ---------------------------------------------------------
 
@@ -104,10 +134,23 @@ public class CompareTab extends JPanel {
 
         setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
 
+        loadCompareSettings();
+
         viewArea = buildPlaceholder();
         add(viewArea, BorderLayout.CENTER);
 
         api.userInterface().applyThemeToComponent(this);
+    }
+
+    /** Loads ignore-patterns and font size used by the diff view. */
+    private void loadCompareSettings() {
+        try {
+            ignorePatterns = RunEngine.loadIgnorePatterns(dbManager);
+        } catch (Exception ignored) {}
+        try {
+            String fs = dbManager.getSetting("font_size");
+            if (fs != null) fontSize = Integer.parseInt(fs.trim());
+        } catch (Exception ignored) {}
     }
 
     // ---- Public API ---------------------------------------------------
@@ -168,6 +211,13 @@ public class CompareTab extends JPanel {
 
         loader.submit(() -> {
             try {
+                // Pick up any ignore-pattern / font changes made in Settings.
+                ignorePatterns = RunEngine.loadIgnorePatterns(dbManager);
+                try {
+                    String fs = dbManager.getSetting("font_size");
+                    if (fs != null) fontSize = Integer.parseInt(fs.trim());
+                } catch (Exception ignored) {}
+
                 var tcOpt = tcRepo.getById(tcId);
                 if (tcOpt.isEmpty()) return;
                 var tc = tcOpt.get();
@@ -221,6 +271,10 @@ public class CompareTab extends JPanel {
                     rebuildCombos();
                     buildSessionChips(resultList);
                     renderPanes();
+                    // Focus a diff pane so ↑/↓ ←/→ work immediately.
+                    if (diffMode && diffView != null) {
+                        (focusedLeft ? diffView.leftPane() : diffView.rightPane()).requestFocusInWindow();
+                    }
                 });
 
             } catch (Exception e) {
@@ -263,15 +317,35 @@ public class CompareTab extends JPanel {
         // search, and the full right-click context menu).
         setEditorResponse(leftEditor,  leftRaw);
         setEditorResponse(rightEditor, rightRaw);
-        if (leftTitle  != null) leftTitle.setText("OLD: "  + left.label());
-        if (rightTitle != null) rightTitle.setText("NEW: " + right.label());
 
-        // Similarity for the summary still comes from the line diff.
-        DiffUtil.SideBySideDiff diff = DiffUtil.compute(leftRaw, rightRaw);
-        updateSummary(left, right, diff);
+        // Render the highlighted diff (raw or normalized).
+        DiffUtil.SideBySideDiff diff = normalized
+            ? DiffUtil.computeNormalized(leftRaw, rightRaw, ignorePatterns)
+            : DiffUtil.compute(leftRaw, rightRaw);
+        if (diffView != null) {
+            diffView.setFontSize(fontSize);
+            diffView.render(diff);
+        }
+
+        updateTitles(left, right);
+
+        // Similarity is computed consistently with the engine: JSON-aware and,
+        // in normalized mode, with ignore-patterns stripped.
+        double sim = RunEngine.computeSimilarity(leftRaw, rightRaw,
+            normalized ? ignorePatterns : Collections.emptyList());
+        updateSummary(left, right, sim);
+
+        if (requestShown) loadRequestForCurrentTc();
 
         reviewedBtn.setEnabled(currentResultId > 0);
         reviewedBtn.setText(currentReviewed ? "✓ Reviewed" : "Mark Reviewed");
+    }
+
+    private void updateTitles(ResponseEntry left, ResponseEntry right) {
+        if (leftTitle != null)
+            leftTitle.setText((focusedLeft ? "▶ " : "") + "OLD: " + left.label());
+        if (rightTitle != null)
+            rightTitle.setText((!focusedLeft ? "▶ " : "") + "NEW: " + right.label());
     }
 
     private void setEditorResponse(HttpResponseEditor editor, byte[] raw) {
@@ -315,10 +389,27 @@ public class CompareTab extends JPanel {
 
         p.add(buildTopPanel(), BorderLayout.NORTH);
         p.add(buildEditorPanel(), BorderLayout.CENTER);
-        p.add(buildToolBar(), BorderLayout.SOUTH);
+
+        // South stack: collapsible request strip above the toolbar.
+        JPanel south = new JPanel(new BorderLayout());
+        south.add(buildRequestStrip(), BorderLayout.NORTH);
+        south.add(buildToolBar(), BorderLayout.SOUTH);
+        p.add(south, BorderLayout.SOUTH);
+
+        installNavKeys(p, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
 
         api.userInterface().applyThemeToComponent(p);
         return p;
+    }
+
+    /** Collapsible "Show request" strip (collapsed by default). */
+    private JPanel buildRequestStrip() {
+        requestEditor = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
+        requestStrip = new JPanel(new BorderLayout());
+        requestStrip.add(requestEditor.uiComponent(), BorderLayout.CENTER);
+        requestStrip.setPreferredSize(new Dimension(10, 200));
+        requestStrip.setVisible(false);
+        return requestStrip;
     }
 
     private JPanel buildTopPanel() {
@@ -391,7 +482,7 @@ public class CompareTab extends JPanel {
         return top;
     }
 
-    private JSplitPane buildEditorPanel() {
+    private JComponent buildEditorPanel() {
         leftEditor  = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
         rightEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
 
@@ -406,12 +497,81 @@ public class CompareTab extends JPanel {
         rightWrap.add(rightTitle, BorderLayout.NORTH);
         rightWrap.add(rightEditor.uiComponent(), BorderLayout.CENTER);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftWrap, rightWrap);
-        split.setResizeWeight(0.5);
-        split.setDividerSize(4);
-        split.setContinuousLayout(true);
-        api.userInterface().applyThemeToComponent(split);
-        return split;
+        JSplitPane editorSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftWrap, rightWrap);
+        editorSplit.setResizeWeight(0.5);
+        editorSplit.setDividerSize(4);
+        editorSplit.setContinuousLayout(true);
+
+        // Custom diff view (default) — muted highlight, synced scroll, jump.
+        diffView = new DiffView();
+        diffView.setFontSize(fontSize);
+        // Track which diff pane is focused for ←/→ cycling, and bind nav keys there.
+        for (Component c : diffView.getComponents()) installFocusTracking(c);
+
+        centerCards = new JPanel(centerLayout);
+        centerCards.add(diffView, "diff");
+        centerCards.add(editorSplit, "editors");
+        centerLayout.show(centerCards, "diff");
+
+        // Keyboard navigation bound on the focusable diff panes (wins over caret).
+        diffView.installKeyNavigation(
+            this::navigatePrev,
+            this::navigateNext,
+            () -> cycleResponse(focusedLeft, false),
+            () -> cycleResponse(focusedLeft, true),
+            () -> setFocusedLeft(!focusedLeft));
+        diffView.leftPane().addFocusListener(focusSetter(true));
+        diffView.rightPane().addFocusListener(focusSetter(false));
+
+        api.userInterface().applyThemeToComponent(editorSplit);
+        return centerCards;
+    }
+
+    private FocusAdapter focusSetter(boolean left) {
+        return new FocusAdapter() {
+            @Override public void focusGained(FocusEvent e) { setFocusedLeft(left); }
+        };
+    }
+
+    private void setFocusedLeft(boolean left) {
+        if (focusedLeft == left && leftTitle != null) return;
+        focusedLeft = left;
+        // Reflect focus in the pane titles without a full re-render.
+        if (!responses.isEmpty()) {
+            updateTitles(responses.get(Math.min(leftIdx, responses.size() - 1)),
+                         responses.get(Math.min(rightIdx, responses.size() - 1)));
+        }
+    }
+
+    /** Ancestor-level fallback bindings (when focus is on combos/chips, not a pane). */
+    private void installNavKeys(JComponent comp, int condition) {
+        InputMap im = comp.getInputMap(condition);
+        ActionMap am = comp.getActionMap();
+        bindKey(im, am, KeyStroke.getKeyStroke(KeyEvent.VK_UP, 0),    "bacPrevTc",    this::navigatePrev);
+        bindKey(im, am, KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, 0),  "bacNextTc",    this::navigateNext);
+        bindKey(im, am, KeyStroke.getKeyStroke(KeyEvent.VK_LEFT, 0),  "bacCyclePrev", () -> cycleResponse(focusedLeft, false));
+        bindKey(im, am, KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "bacCycleNext", () -> cycleResponse(focusedLeft, true));
+    }
+
+    private static void bindKey(InputMap im, ActionMap am, KeyStroke ks, String key, Runnable r) {
+        im.put(ks, key);
+        am.put(key, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { r.run(); }
+        });
+    }
+
+    /** Recursively attach a mouse listener so clicking either side sets the focused pane. */
+    private void installFocusTracking(Component c) {
+        c.addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) {
+                // Heuristic: left half of the diff view = OLD, right half = NEW.
+                Point p = SwingUtilities.convertPoint(e.getComponent(), e.getPoint(), diffView);
+                setFocusedLeft(p.x < diffView.getWidth() / 2);
+            }
+        });
+        if (c instanceof Container con) {
+            for (Component child : con.getComponents()) installFocusTracking(child);
+        }
     }
 
     private JLabel paneTitle(String text) {
@@ -425,8 +585,40 @@ public class CompareTab extends JPanel {
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         bar.setBorder(BorderFactory.createEmptyBorder(2, 8, 4, 8));
 
+        // Diff-jump prev/next
+        JButton diffPrev = new JButton("‹ diff");
+        JButton diffNext = new JButton("diff ›");
+        diffPrev.setToolTipText("Jump to previous difference");
+        diffNext.setToolTipText("Jump to next difference");
+        diffPrev.addActionListener(e -> { if (diffView != null) diffView.jumpPrev(); });
+        diffNext.addActionListener(e -> { if (diffView != null) diffView.jumpNext(); });
+        bar.add(diffPrev);
+        bar.add(diffNext);
+
+        bar.add(new JSeparator(JSeparator.VERTICAL));
+
+        // View mode: Diff highlight ↔ Burp-native editors
+        JToggleButton viewToggle = new JToggleButton("Editors");
+        viewToggle.setToolTipText("Switch between the highlighted diff and the Burp-native editors "
+            + "(syntax colouring, search, right-click)");
+        viewToggle.addActionListener(e -> {
+            diffMode = !viewToggle.isSelected();
+            centerLayout.show(centerCards, diffMode ? "diff" : "editors");
+            viewToggle.setText(diffMode ? "Editors" : "Diff view");
+            renderPanes();
+        });
+        bar.add(viewToggle);
+
+        // Normalized ↔ raw
+        JToggleButton normToggle = new JToggleButton("Normalized");
+        normToggle.setToolTipText("Grey out and exclude ignore-pattern lines (timestamps, nonces, "
+            + "CSRF tokens) from the diff and similarity");
+        normToggle.addActionListener(e -> { normalized = normToggle.isSelected(); renderPanes(); });
+        bar.add(normToggle);
+
         // Swap sides
         JButton swapBtn = new JButton("⇄ Swap");
+        swapBtn.setToolTipText("Swap the OLD and NEW responses");
         swapBtn.addActionListener(e -> {
             int tmp = leftIdx; leftIdx = rightIdx; rightIdx = tmp;
             leftCombo.setSelectedIndex(leftIdx);
@@ -434,6 +626,12 @@ public class CompareTab extends JPanel {
             renderPanes();
         });
         bar.add(swapBtn);
+
+        // Show / hide request
+        showRequestBtn = new JButton("▸ Show request");
+        showRequestBtn.setToolTipText("Show the captured request (collapsed by default)");
+        showRequestBtn.addActionListener(e -> toggleRequest());
+        bar.add(showRequestBtn);
 
         // Send to Burp Comparer (for a full word-level diff)
         JButton comparerBtn = new JButton("📋 Send to Comparer");
@@ -449,7 +647,7 @@ public class CompareTab extends JPanel {
         reviewedBtn.addActionListener(e -> toggleReviewed());
         bar.add(reviewedBtn);
 
-        noteField = new JTextField(18);
+        noteField = new JTextField(16);
         noteField.setToolTipText("Note for this result");
         noteField.addActionListener(e -> saveNote());
         bar.add(new JLabel("Note:"));
@@ -457,6 +655,32 @@ public class CompareTab extends JPanel {
 
         api.userInterface().applyThemeToComponent(bar);
         return bar;
+    }
+
+    private void toggleRequest() {
+        requestShown = !requestShown;
+        requestStrip.setVisible(requestShown);
+        showRequestBtn.setText(requestShown ? "▾ Hide request" : "▸ Show request");
+        if (requestShown) loadRequestForCurrentTc();
+        revalidate();
+        repaint();
+    }
+
+    private void loadRequestForCurrentTc() {
+        if (workingSetIdx < 0 || workingSetIdx >= workingSet.size()) return;
+        long tcId = workingSet.get(workingSetIdx);
+        loader.submit(() -> {
+            try {
+                byte[] raw = tcRepo.getRequestRaw(tcId);
+                if (raw == null || raw.length == 0) return;
+                SwingUtilities.invokeLater(() -> {
+                    try { requestEditor.setRequest(HttpRequest.httpRequest(ByteArray.byteArray(raw))); }
+                    catch (Exception ignored) {}
+                });
+            } catch (Exception e) {
+                api.logging().logToError("[BAC] Compare request load: " + e.getMessage());
+            }
+        });
     }
 
     // ---- Session chips ------------------------------------------------
@@ -521,12 +745,11 @@ public class CompareTab extends JPanel {
             navLabel.setText((workingSetIdx + 1) + " / " + workingSet.size());
     }
 
-    private void updateSummary(ResponseEntry left, ResponseEntry right, DiffUtil.SideBySideDiff diff) {
+    private void updateSummary(ResponseEntry left, ResponseEntry right, double sim) {
         int ls = left.status()  != null ? left.status()  : 0;
         int rs = right.status() != null ? right.status() : 0;
         int ll = left.length()  != null ? left.length()  : 0;
         int rl = right.length() != null ? right.length() : 0;
-        double sim = diff.similarity();
 
         String statusPart  = ls + " → " + rs;
         String sizePart    = kbLabel(ll) + " → " + kbLabel(rl);

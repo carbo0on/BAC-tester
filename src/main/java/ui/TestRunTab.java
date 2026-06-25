@@ -175,7 +175,8 @@ public class TestRunTab extends JPanel {
         top.add(scopeCombo);
 
         safeModeCheck = new JCheckBox("Safe Mode", !"false".equalsIgnoreCase(readSetting("safe_mode")));
-        safeModeCheck.setToolTipText("Skip DELETE requests during runs (other methods are still replayed)");
+        safeModeCheck.setToolTipText("Skip destructive requests during runs. What counts as destructive "
+            + "(DELETE-only or all state-changing) is set in BAC Settings ▸ Run Safety.");
         top.add(safeModeCheck);
 
         runBtn = new JButton("Run ▶");
@@ -567,6 +568,16 @@ public class TestRunTab extends JPanel {
             return;
         }
         startQueue(List.of(accountId), tcIds);
+    }
+
+    /** Run several accounts sequentially over the same test cases (e.g. A-vs-B pair). */
+    public void startAccountsDirectly(List<Long> accountIds, List<Long> tcIds) {
+        if (engine.isRunning()) {
+            JOptionPane.showMessageDialog(this, "A run is already in progress.",
+                "Busy", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        startQueue(accountIds, tcIds);
     }
 
     private void startRun() {

@@ -99,10 +99,12 @@ public class LibraryTab extends JPanel {
     private Consumer<List<Long>>     onAddToWorkingSet;
     private Consumer<Long>           onOpenInCompare;
     private BiConsumer<Long, List<Long>> onRunSelected;
+    private BiConsumer<List<Long>, List<Long>> onRunPair;   // (accountIds, tcIds)
 
     public void setOnAddToWorkingSet(Consumer<List<Long>> cb) { this.onAddToWorkingSet = cb; }
     public void setOnOpenInCompare(Consumer<Long> cb)         { this.onOpenInCompare = cb; }
     public void setOnRunSelected(BiConsumer<Long, List<Long>> cb) { this.onRunSelected = cb; }
+    public void setOnRunPair(BiConsumer<List<Long>, List<Long>> cb) { this.onRunPair = cb; }
 
     public void setAccountRepository(AccountRepository repo) {
         this.accountRepo = repo;
@@ -812,6 +814,8 @@ public class LibraryTab extends JPanel {
         JMenuItem deleteItem     = new JMenuItem("Delete");
         JMenuItem viewItem       = new JMenuItem("View Request / Response");
         JMenuItem compareItem    = new JMenuItem("Open in Compare");
+        JMenuItem runPairItem    = new JMenuItem("Run pair (A vs B) → Compare…");
+        JMenuItem dynFieldsItem  = new JMenuItem("Edit Dynamic Fields (CSRF/nonce)…");
         JMenuItem rebaselineItem = new JMenuItem("Re-baseline (resend as owner)");
 
         JMenu colorMenu = new JMenu("Set Color");
@@ -827,8 +831,9 @@ public class LibraryTab extends JPanel {
 
         popup.add(renameItem); popup.add(notesItem); popup.add(colorMenu); popup.add(moveItem);
         popup.addSeparator();
-        popup.add(viewItem); popup.add(compareItem);
+        popup.add(viewItem); popup.add(compareItem); popup.add(runPairItem);
         popup.addSeparator();
+        popup.add(dynFieldsItem);
         popup.add(rebaselineItem);
         popup.addSeparator();
         popup.add(deleteItem);
@@ -885,6 +890,19 @@ public class LibraryTab extends JPanel {
             onOpenInCompare.accept(tableModel.getRow(row).id());
         });
 
+        runPairItem.addActionListener(e -> {
+            int[] rows = table.getSelectedRows();
+            if (rows.length == 0) return;
+            List<Long> tcIds = new ArrayList<>();
+            for (int r : rows) tcIds.add(tableModel.getRow(r).id());
+            promptRunPair(tcIds);
+        });
+
+        dynFieldsItem.addActionListener(e -> {
+            int row = table.getSelectedRow();
+            if (row >= 0) editDynamicFields(tableModel.getRow(row));
+        });
+
         rebaselineItem.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
             if (rows.length == 0) return;
@@ -909,7 +927,9 @@ public class LibraryTab extends JPanel {
                     byte[] reqRaw = tcRepo.getRequestRaw(tcId);
                     if (reqRaw == null) { errors++; continue; }
                     HttpService service = HttpService.httpService(tc.host(), tc.port(), tc.isHttps());
-                    HttpRequest req = buildOwnerRequest(reqRaw, owner, service);
+                    java.util.List<engine.DynamicField> dyn =
+                        engine.DynamicField.parse(tcRepo.getDynamicFields(tcId));
+                    HttpRequest req = buildOwnerRequest(reqRaw, owner, service, dyn);
                     if (req == null) { errors++; continue; }
                     var resp = api.http().sendRequest(req);
                     byte[] respRaw = resp.response().toByteArray().getBytes();
@@ -934,24 +954,12 @@ public class LibraryTab extends JPanel {
         });
     }
 
-    private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner, HttpService service) {
+    private HttpRequest buildOwnerRequest(byte[] rawRequest, AccountRecord owner, HttpService service,
+                                          java.util.List<engine.DynamicField> dynamicFields) {
         try {
-            HttpRequest req = service != null
-                ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
-                : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
-            for (String h : new String[]{"Cookie","Authorization","X-Auth-Token","X-Session-Token","X-Access-Token","X-Api-Key"})
-                req = req.withRemovedHeader(h);
-            Map<String, String> cookies = owner.cookies();
-            if (!cookies.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (var entry : cookies.entrySet()) {
-                    if (sb.length() > 0) sb.append("; ");
-                    sb.append(entry.getKey()).append("=").append(entry.getValue());
-                }
-                req = req.withAddedHeader("Cookie", sb.toString());
-            }
-            for (var entry : owner.headers().entrySet()) req = req.withAddedHeader(entry.getKey(), entry.getValue());
-            return req;
+            // Reuse the engine's identity-swap (cookie merge + dynamic fields) so a
+            // re-baseline produces a response consistent with how runs replay.
+            return engine.RunEngine.buildSwappedRequestStatic(rawRequest, owner, service, dynamicFields);
         } catch (Exception e) {
             api.logging().logToError("[BAC] Build owner request: " + e.getMessage());
             return null;
@@ -1035,6 +1043,77 @@ public class LibraryTab extends JPanel {
         loader.submit(() -> {
             try { tcRepo.setNotes(tc.id(), area.getText()); SwingUtilities.invokeLater(this::reloadTable); }
             catch (Exception ex) { api.logging().logToError("[BAC] Save notes: " + ex.getMessage()); }
+        });
+    }
+
+    /**
+     * Horizontal access-control test: pick two (or more) accounts to replay the
+     * selected requests under, then send them all to the Compare working set so
+     * their responses can be diffed directly (A vs B). (#9)
+     */
+    private void promptRunPair(List<Long> tcIds) {
+        if (accountRepo == null || onRunPair == null) return;
+        loader.submit(() -> {
+            try {
+                List<AccountRecord> accounts = accountRepo.getAll();
+                SwingUtilities.invokeLater(() -> {
+                    if (accounts.size() < 2) {
+                        JOptionPane.showMessageDialog(this,
+                            "Define at least two accounts in the Accounts tab first.",
+                            "Need two accounts", JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
+                    DefaultListModel<String> model = new DefaultListModel<>();
+                    for (AccountRecord a : accounts) model.addElement(a.label());
+                    JList<String> list = new JList<>(model);
+                    list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+                    list.setVisibleRowCount(Math.min(8, accounts.size()));
+                    if (accounts.size() >= 2) list.setSelectedIndices(new int[]{0, 1});
+                    int ok = JOptionPane.showConfirmDialog(this,
+                        new Object[]{
+                            "Replay " + tcIds.size() + " request(s) as each selected account,",
+                            "then compare their responses side-by-side:",
+                            new JScrollPane(list)},
+                        "Run pair (A vs B)", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+                    if (ok != JOptionPane.OK_OPTION) return;
+                    int[] sel = list.getSelectedIndices();
+                    if (sel.length < 2) {
+                        JOptionPane.showMessageDialog(this, "Select at least two accounts.",
+                            "Need two accounts", JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
+                    List<Long> acctIds = new ArrayList<>();
+                    for (int i : sel) acctIds.add(accounts.get(i).id());
+                    onRunPair.accept(acctIds, tcIds);
+                });
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Run pair: " + ex.getMessage());
+            }
+        });
+    }
+
+    private void editDynamicFields(TestCaseRow tc) {
+        loader.submit(() -> {
+            try {
+                String json = tcRepo.getDynamicFields(tc.id());
+                List<engine.DynamicField> fields = engine.DynamicField.parse(json);
+                SwingUtilities.invokeLater(() -> {
+                    Frame parent = api.userInterface().swingUtils().suiteFrame();
+                    String label = tc.name() != null ? tc.name() : tc.url();
+                    DynamicFieldsDialog dlg = new DynamicFieldsDialog(parent, label, fields);
+                    api.userInterface().applyThemeToComponent(dlg.getContentPane());
+                    dlg.setVisible(true);
+                    if (!dlg.isConfirmed()) return;
+                    List<engine.DynamicField> edited = dlg.getFields();
+                    final String toSave = edited.isEmpty() ? null : engine.DynamicField.toJson(edited);
+                    loader.submit(() -> {
+                        try { tcRepo.setDynamicFields(tc.id(), toSave); }
+                        catch (Exception ex) { api.logging().logToError("[BAC] Save dynamic fields: " + ex.getMessage()); }
+                    });
+                });
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Load dynamic fields: " + ex.getMessage());
+            }
         });
     }
 

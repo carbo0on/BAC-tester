@@ -72,6 +72,13 @@ public class MainTab {
             testRunTab.startRunDirectly(accountId, tcIds);
             tabbedPane.setSelectedIndex(TAB_TESTRUN);
         });
+        // A-vs-B pair: replay the requests as each account, and pre-load them into
+        // the Compare working set so the responses can be diffed directly (#9).
+        libraryTab.setOnRunPair((accountIds, tcIds) -> {
+            testRunTab.startAccountsDirectly(accountIds, tcIds);
+            compareTab.addToWorkingSet(tcIds);
+            tabbedPane.setSelectedIndex(TAB_TESTRUN);
+        });
 
         // Wire TestRun → Compare
         testRunTab.setOnOpenInCompare(id -> {

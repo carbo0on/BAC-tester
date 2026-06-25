@@ -40,4 +40,30 @@ See @BAC-Tester-Burp-Extension-Spec.md for the full feature specification, archi
 
 ## Current State
 
-Starter project scaffolded from the official PortSwigger extension template. Implementation pending – refer to the spec for what to build.
+Functional implementation of Phases 1–7. Key packages:
+
+- `capture/` – `CaptureService`: quick-save / save-with-metadata from context menu & hotkey.
+- `db/` – `DatabaseManager` (SQLite schema + migrations) and repositories (`TestCaseRepository`,
+  `AccountRepository`, `RunRepository`, `FolderRepository`).
+- `engine/` – `RunEngine` (canary check, identity swap, dynamic-field rewrite, send, similarity,
+  verdict), `DiffUtil` (line-based side-by-side diff), `DynamicField` (CSRF/nonce locators).
+- `ui/` – `MainTab` host + `LibraryTab`, `AccountsTab`, `TestRunTab` (+ `OverviewMatrix`),
+  `CompareTab` (+ `DiffView`), `SettingsTab`, plus `SaveDialog`, `DynamicFieldsDialog`,
+  `ExportImportManager`.
+
+Notable behaviours:
+
+- **Similarity** is JSON-aware (minified JSON is pretty-printed before diffing) and strips the
+  configured **ignore-patterns** (timestamps / nonces / CSRF tokens) so volatile noise doesn't
+  distort the score or the triage verdict.
+- **Identity swap** merges cookies (account values override, other cookies preserved) and replaces
+  known session headers. **Dynamic fields** (per test case) rewrite CSRF tokens / nonces before replay.
+- **Canary** marks a session dead only on 401/403 or a redirect to a login page (not on any non-2xx).
+- **Safe Mode** scope is configurable: DELETE-only (default) or all state-changing requests.
+- **Compare** offers a highlighted side-by-side `DiffView` (synced scroll, prev/next jump,
+  normalized↔raw toggle, Identical banner) plus the Burp-native editors; ↑/↓ move through the
+  working set, ←/→ cycle the focused pane's response, Tab/click switches the focused pane.
+- **Run pair (A vs B)** from the Library replays the selection under multiple accounts and loads
+  them into the Compare working set for direct horizontal comparison.
+
+Refer to the spec for the full intended feature set.

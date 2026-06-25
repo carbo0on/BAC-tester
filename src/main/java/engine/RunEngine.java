@@ -3,7 +3,16 @@ package engine;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.HttpService;
+import burp.api.montoya.http.message.params.HttpParameter;
+import burp.api.montoya.http.message.params.HttpParameterType;
+import burp.api.montoya.http.message.params.ParsedHttpParameter;
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.google.gson.reflect.TypeToken;
 import db.*;
 
 import java.nio.charset.StandardCharsets;
@@ -13,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Phase 4 run engine: canary check → identity swap → sendRequest → similarity → verdict → persist.
@@ -49,6 +59,10 @@ public class RunEngine {
     // Loaded from settings at the start of each run
     private volatile double greyLowerBound = 60.0;
     private volatile String scopeEnforcement = "WARN"; // WARN / BLOCK / OFF
+    private volatile String safeModeScope = "DELETE";  // DELETE (lenient) / ALL (strict)
+    private volatile List<Pattern> ignorePatterns = new ArrayList<>();
+
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
     public RunEngine(MontoyaApi api, DatabaseManager dbManager) {
         this.api         = api;
@@ -127,6 +141,29 @@ public class RunEngine {
             String se = dbManager.getSetting("scope_enforcement");
             if (se != null) scopeEnforcement = se;
         } catch (Exception ignored) {}
+        try {
+            String sms = dbManager.getSetting("safe_mode_scope");
+            if (sms != null && !sms.isBlank()) safeModeScope = sms.trim().toUpperCase();
+        } catch (Exception ignored) {}
+        ignorePatterns = loadIgnorePatterns(dbManager);
+    }
+
+    /** Compiles the user's ignore-pattern regexes from settings; invalid ones are skipped. */
+    public static List<Pattern> loadIgnorePatterns(DatabaseManager db) {
+        List<Pattern> compiled = new ArrayList<>();
+        try {
+            String json = db.getSetting("ignore_patterns");
+            if (json != null && !json.isBlank()) {
+                List<String> raw = new Gson().fromJson(json, new TypeToken<List<String>>() {}.getType());
+                if (raw != null) {
+                    for (String r : raw) {
+                        if (r == null || r.isBlank()) continue;
+                        try { compiled.add(Pattern.compile(r)); } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return compiled;
     }
 
     // ---- Canary check --------------------------------------------------
@@ -140,16 +177,35 @@ public class RunEngine {
             TestCaseRepository.TestCaseRow canaryTc = tcRepo.getById(canaryId).orElse(null);
             if (canaryTc == null) return true;
             HttpService service = HttpService.httpService(canaryTc.host(), canaryTc.port(), canaryTc.isHttps());
-            HttpRequest req = buildSwappedRequest(raw, account, service);
+            List<DynamicField> dyn = DynamicField.parse(tcRepo.getDynamicFields(canaryId));
+            HttpRequest req = buildSwappedRequest(raw, account, service, dyn);
             if (req == null) return true;
             var resp = api.http().sendRequest(req);
-            int status = resp.response().statusCode();
-            // 2xx = good; 401/403/redirect (3xx) = session dead
-            return status >= 200 && status < 300;
+            if (resp.response() == null) return false; // unreachable — don't emit false results
+            return !isSessionDead(resp.response());
         } catch (Exception e) {
             api.logging().logToError("[BAC] Canary check error: " + e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * A session is considered DEAD only on unambiguous auth-failure signals:
+     * 401/403, or a redirect (3xx) whose Location points at a login/auth page.
+     * Other statuses (2xx, 404, 5xx, non-login 3xx) are NOT treated as expired
+     * sessions, so legitimate non-2xx canary endpoints don't abort the run.
+     */
+    public static boolean isSessionDead(HttpResponse response) {
+        int status = response.statusCode();
+        if (status == 401 || status == 403) return true;
+        if (status >= 300 && status < 400) {
+            String loc = response.headerValue("Location");
+            if (loc != null && Pattern.compile("(?i)(login|signin|sign-in|sign_in|auth|sso|account/login)")
+                    .matcher(loc).find()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- Single test case ----------------------------------------------
@@ -160,9 +216,10 @@ public class RunEngine {
         TestCaseRepository.TestCaseRow tc = tcRepo.getById(tcId).orElse(null);
         if (tc == null) return;
 
-        // Safe mode: skip DELETE requests only (the most destructive verb).
-        // POST/PUT/PATCH are still replayed so access control on them can be tested.
-        if (safeMode && "DELETE".equalsIgnoreCase(tc.method())) {
+        // Safe mode: skip destructive requests so a replay never mutates target data.
+        //   DELETE (lenient, default) → skip only DELETE; POST/PUT/PATCH still replayed.
+        //   ALL   (strict)           → skip every state-changing request.
+        if (safeMode && shouldSkipForSafeMode(tc)) {
             String expAccess = account.expectedAccess() != null ? account.expectedAccess() : "UNKNOWN";
             saveSkipped(runId, tc, account, expAccess);
             return;
@@ -192,7 +249,8 @@ public class RunEngine {
             }
 
             HttpService service = HttpService.httpService(tc.host(), tc.port(), tc.isHttps());
-            HttpRequest req = buildSwappedRequest(requestRaw, account, service);
+            List<DynamicField> dyn = DynamicField.parse(tcRepo.getDynamicFields(tcId));
+            HttpRequest req = buildSwappedRequest(requestRaw, account, service, dyn);
             if (req == null) {
                 saveResult(runId, tc, account, baselineId > 0 ? baselineId : null,
                            0, 0, "", new byte[0], 0.0, ERROR);
@@ -217,9 +275,11 @@ public class RunEngine {
             api.logging().logToOutput("[BAC] Run TC " + tcId + ": status=" + newStatus
                 + " responseBytes=" + newResponseRaw.length);
 
-            // Extract baseline body for similarity
+            // Extract baseline body for similarity. Ignore-patterns (timestamps,
+            // nonces, CSRF tokens…) are stripped and JSON is pretty-printed first
+            // so volatile noise doesn't depress the score (§3.2).
             byte[] baselineBody = extractBody(baselineRaw);
-            double similarity = computeSimilarity(baselineBody, newBody);
+            double similarity = computeSimilarity(baselineBody, newBody, ignorePatterns);
 
             String expectedAccess = account.expectedAccess() != null ? account.expectedAccess() : "UNKNOWN";
             String verdict = computeVerdict(
@@ -240,66 +300,164 @@ public class RunEngine {
 
     // ---- Identity swap -------------------------------------------------
 
+    private boolean shouldSkipForSafeMode(TestCaseRepository.TestCaseRow tc) {
+        if ("ALL".equalsIgnoreCase(safeModeScope)) return tc.isStateChanging();
+        return "DELETE".equalsIgnoreCase(tc.method());
+    }
+
     /**
-     * Reconstruct request from raw bytes with new auth material injected.
-     * Removes existing Cookie and Authorization headers, injects from account.
+     * Reconstruct a request from raw bytes with the account's identity injected,
+     * then apply any dynamic-field rewrites.
+     *
+     * <p>Cookies are <b>merged</b>, not wiped: existing cookies (CSRF token,
+     * load-balancer affinity, locale, …) are preserved and only the keys the
+     * account defines are overridden. This avoids breaking the request for
+     * reasons unrelated to access control (#4). Known session headers are still
+     * replaced wholesale so the original identity can't leak through.</p>
      */
+    public static HttpRequest buildSwappedRequestStatic(byte[] rawRequest,
+                                                        AccountRepository.AccountRecord account,
+                                                        HttpService service,
+                                                        List<DynamicField> dynamicFields) {
+        // Bind the request to its target service (host/port/TLS). Without this the
+        // request has no destination and sendRequest fails with an empty response —
+        // which is why responses never appeared for HTTPS targets.
+        HttpRequest req = service != null
+            ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
+            : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
+
+        // Preserve the original cookie jar, overriding only the account's keys.
+        String originalCookie = req.headerValue("Cookie");
+        LinkedHashMap<String, String> mergedCookies = parseCookieHeader(originalCookie);
+        mergedCookies.putAll(account.cookies());
+
+        // Replace known session headers wholesale so the old identity can't leak.
+        for (String h : new String[]{"Authorization", "X-Auth-Token", "X-Session-Token",
+                                      "X-Access-Token", "X-Api-Key"}) {
+            req = req.withRemovedHeader(h);
+        }
+        req = req.withRemovedHeader("Cookie");
+        if (!mergedCookies.isEmpty()) {
+            req = req.withAddedHeader("Cookie", buildCookieHeader(mergedCookies));
+        }
+        for (var entry : account.headers().entrySet()) {
+            req = req.withAddedHeader(entry.getKey(), entry.getValue());
+        }
+
+        return applyDynamicFields(req, dynamicFields, account);
+    }
+
     private HttpRequest buildSwappedRequest(byte[] rawRequest, AccountRepository.AccountRecord account,
-                                            HttpService service) {
+                                            HttpService service, List<DynamicField> dynamicFields) {
         try {
-            // Bind the request to its target service (host/port/TLS). Without this the
-            // request has no destination and sendRequest fails with an empty response —
-            // which is why responses never appeared for HTTPS targets.
-            HttpRequest req = service != null
-                ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
-                : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
-
-            // Remove auth headers
-            req = req.withRemovedHeader("Cookie");
-            req = req.withRemovedHeader("Authorization");
-            req = req.withRemovedHeader("X-Auth-Token");
-            req = req.withRemovedHeader("X-Session-Token");
-            req = req.withRemovedHeader("X-Access-Token");
-            req = req.withRemovedHeader("X-Api-Key");
-
-            // Inject new cookies
-            Map<String, String> cookies = account.cookies();
-            if (!cookies.isEmpty()) {
-                StringBuilder cookieHeader = new StringBuilder();
-                for (var entry : cookies.entrySet()) {
-                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
-                    cookieHeader.append(entry.getKey()).append("=").append(entry.getValue());
-                }
-                req = req.withAddedHeader("Cookie", cookieHeader.toString());
-            }
-
-            // Inject new session headers (Authorization etc.)
-            for (var entry : account.headers().entrySet()) {
-                req = req.withAddedHeader(entry.getKey(), entry.getValue());
-            }
-
-            return req;
+            return buildSwappedRequestStatic(rawRequest, account, service, dynamicFields);
         } catch (Exception e) {
             api.logging().logToError("[BAC] Failed to build swapped request: " + e.getMessage());
             return null;
         }
     }
 
+    // ---- Dynamic fields (#2 — CSRF / nonce handling) -------------------
+
+    /** Rewrites dynamic fields (CSRF tokens, nonces, …) before replay. */
+    public static HttpRequest applyDynamicFields(HttpRequest req, List<DynamicField> fields,
+                                                 AccountRepository.AccountRecord account) {
+        if (fields == null || fields.isEmpty()) return req;
+        for (DynamicField f : fields) {
+            if (f == null || f.name() == null || f.name().isBlank()) continue;
+            String resolved = resolveDynamicValue(f, account);
+            boolean remove = f.strategy() == DynamicField.Strategy.REMOVE || resolved == null;
+            switch (f.location()) {
+                case HEADER -> req = remove
+                    ? req.withRemovedHeader(f.name())
+                    : req.withUpdatedHeader(f.name(), resolved);
+                case COOKIE -> {
+                    LinkedHashMap<String, String> cookies = parseCookieHeader(req.headerValue("Cookie"));
+                    if (remove) cookies.remove(f.name()); else cookies.put(f.name(), resolved);
+                    req = req.withRemovedHeader("Cookie");
+                    if (!cookies.isEmpty()) req = req.withAddedHeader("Cookie", buildCookieHeader(cookies));
+                }
+                case QUERY_PARAM -> req = setParameter(req, f.name(), resolved, remove, HttpParameterType.URL);
+                case BODY_PARAM  -> req = setParameter(req, f.name(), resolved, remove, HttpParameterType.BODY);
+            }
+        }
+        return req;
+    }
+
+    private static HttpRequest setParameter(HttpRequest req, String name, String value,
+                                            boolean remove, HttpParameterType type) {
+        boolean exists = false;
+        for (ParsedHttpParameter p : req.parameters()) {
+            if (p.type() == type && p.name().equals(name)) { exists = true; break; }
+        }
+        HttpParameter param = HttpParameter.parameter(name, value != null ? value : "", type);
+        if (remove) {
+            return exists ? req.withRemovedParameters(param) : req;
+        }
+        return exists ? req.withUpdatedParameters(param) : req.withAddedParameters(param);
+    }
+
+    private static String resolveDynamicValue(DynamicField f, AccountRepository.AccountRecord account) {
+        return switch (f.strategy()) {
+            case REMOVE      -> null;
+            case STATIC      -> f.value() != null ? f.value() : "";
+            case FROM_COOKIE -> account != null ? account.cookies().get(f.value()) : null;
+            case FROM_HEADER -> {
+                if (account == null) yield null;
+                // header lookup is case-insensitive
+                for (var e : account.headers().entrySet())
+                    if (e.getKey().equalsIgnoreCase(f.value())) yield e.getValue();
+                yield null;
+            }
+        };
+    }
+
+    // ---- Cookie helpers ------------------------------------------------
+
+    public static LinkedHashMap<String, String> parseCookieHeader(String header) {
+        LinkedHashMap<String, String> map = new LinkedHashMap<>();
+        if (header == null || header.isBlank()) return map;
+        for (String part : header.split(";")) {
+            String t = part.trim();
+            int eq = t.indexOf('=');
+            if (eq > 0) map.put(t.substring(0, eq).trim(), t.substring(eq + 1).trim());
+        }
+        return map;
+    }
+
+    public static String buildCookieHeader(Map<String, String> cookies) {
+        StringBuilder sb = new StringBuilder();
+        for (var entry : cookies.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(entry.getKey()).append('=').append(entry.getValue());
+        }
+        return sb.toString();
+    }
+
     // ---- Similarity ----------------------------------------------------
+
+    /** Back-compat overload with no ignore patterns. */
+    public static double computeSimilarity(byte[] body1, byte[] body2) {
+        return computeSimilarity(body1, body2, null);
+    }
 
     /**
      * Computes normalized similarity between two bodies (0.0–100.0).
-     * Uses line-based Levenshtein-style diff with a fast approximation
-     * suitable for typical HTTP response bodies up to 200 KB.
+     *
+     * <p>Before diffing, each body is normalized: JSON is pretty-printed so a
+     * minified single-line API response yields a real line-level gradient
+     * (#3), and the user's ignore-patterns strip volatile noise such as
+     * timestamps, nonces and CSRF tokens (#1). Uses a line-based LCS ratio,
+     * suitable for typical HTTP bodies up to 200 KB.</p>
      */
-    public static double computeSimilarity(byte[] body1, byte[] body2) {
+    public static double computeSimilarity(byte[] body1, byte[] body2, List<Pattern> ignorePatterns) {
         if (body1 == null) body1 = new byte[0];
         if (body2 == null) body2 = new byte[0];
         if (body1.length == 0 && body2.length == 0) return 100.0;
         if (body1.length == 0 || body2.length == 0) return 0.0;
 
-        String s1 = new String(body1, StandardCharsets.UTF_8);
-        String s2 = new String(body2, StandardCharsets.UTF_8);
+        String s1 = normalizeForSimilarity(new String(body1, StandardCharsets.UTF_8), ignorePatterns);
+        String s2 = normalizeForSimilarity(new String(body2, StandardCharsets.UTF_8), ignorePatterns);
 
         // Truncate to 200 KB for performance
         if (s1.length() > 200_000) s1 = s1.substring(0, 200_000);
@@ -319,6 +477,35 @@ public class RunEngine {
         int total = lines1.length + lines2.length;
         if (total == 0) return 100.0;
         return Math.round((2.0 * lcs / total) * 10000.0) / 100.0;
+    }
+
+    /**
+     * Pretty-prints JSON bodies (so minified JSON diffs line-by-line) and strips
+     * ignore-pattern matches. Falls back to the raw text when not JSON.
+     */
+    public static String normalizeForSimilarity(String body, List<Pattern> ignorePatterns) {
+        if (body == null) return "";
+        String s = prettyPrintJsonIfPossible(body);
+        if (ignorePatterns != null) {
+            for (Pattern p : ignorePatterns) {
+                try { s = p.matcher(s).replaceAll(""); } catch (Exception ignored) {}
+            }
+        }
+        return s;
+    }
+
+    /** Returns pretty-printed JSON if {@code body} parses as JSON, else the original. */
+    public static String prettyPrintJsonIfPossible(String body) {
+        String trimmed = body.trim();
+        if (trimmed.isEmpty()) return body;
+        char c = trimmed.charAt(0);
+        if (c != '{' && c != '[') return body;        // cheap pre-check
+        if (trimmed.length() > 500_000) return body;   // don't re-serialize huge payloads
+        try {
+            JsonElement el = JsonParser.parseString(trimmed);
+            if (el.isJsonObject() || el.isJsonArray()) return GSON.toJson(el);
+        } catch (Exception ignored) {}
+        return body;
     }
 
     private static int lcsCount(String[] a, String[] b) {

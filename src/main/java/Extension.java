@@ -5,7 +5,6 @@ import burp.api.montoya.logging.Logging;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
 import burp.api.montoya.ui.hotkey.HotKey;
-import burp.api.montoya.ui.hotkey.HotKeyContext;
 import burp.api.montoya.ui.hotkey.HotKeyHandler;
 import capture.CaptureService;
 import db.AccountRepository;
@@ -41,6 +40,7 @@ public class Extension implements BurpExtension {
     public void initialize(MontoyaApi api) {
         api.extension().setName("BAC Time-Machine");
         Logging logging = api.logging();
+        logging.logToOutput("[BAC] BAC Time-Machine — designed by Cataract.");
 
         // --- 1. Database path -------------------------------------------
         String dbPath = api.persistence().preferences().getString("bac_db_path");
@@ -79,11 +79,16 @@ public class Extension implements BurpExtension {
                                        new FolderRepository(dbManager)));
 
         // --- 6. Hotkey: quick-save to Inbox (configurable in Settings) ---
-        // Default is Alt+Q. The combo is read from the settings table so users
-        // can rebind it; changing it takes effect after the extension is
-        // reloaded. Registration is wrapped so an unsupported combo only logs a
-        // warning instead of aborting extension load.
-        String hotkeyCombo = "Alt+Q";
+        // Default is Ctrl+Alt+B. The combo is read from the settings table so
+        // users can rebind it; changing it takes effect after the extension is
+        // reloaded.
+        //
+        // NOTE: previous versions registered the SAME combo in three separate
+        // contexts at once, which Burp treats as a conflict and silently
+        // disables — that is why the hotkey "didn't work". We now use the
+        // context-less overload, which fires for ANY supported context with a
+        // single registration.
+        String hotkeyCombo = "Ctrl+Alt+B";
         try {
             String stored = dbManager.getSetting("hotkey_combo");
             if (stored != null && !stored.isBlank()) hotkeyCombo = stored.trim();
@@ -110,30 +115,16 @@ public class Extension implements BurpExtension {
             logging.logToOutput("[BAC] Quick-save hotkey: no request in focus to save.");
         };
 
-        // Register for every context that exposes requests so the key works
-        // "anywhere" (Repeater, Proxy intercept, Proxy history, Site map).
-        HotKeyContext[] contexts = {
-            HotKeyContext.HTTP_MESSAGE_EDITOR,
-            HotKeyContext.PROXY_HTTP_HISTORY,
-            HotKeyContext.SITE_MAP_CONTENTS_TABLE
-        };
-        int registered = 0;
-        for (HotKeyContext ctx : contexts) {
-            try {
-                api.userInterface().registerHotKeyHandler(
-                    ctx, HotKey.hotKey("BAC: Quick-save request", hotkeyCombo), quickSaveHandler);
-                registered++;
-            } catch (Exception e) {
-                logging.logToError("[BAC] Could not register hotkey \"" + hotkeyCombo
-                    + "\" for context " + ctx + " (" + e.getMessage() + ").");
-            }
-        }
-        if (registered > 0) {
-            logging.logToOutput("[BAC] BAC Time-Machine loaded. Quick-save hotkey: "
-                + hotkeyCombo + " (registered in " + registered + " contexts).");
-        } else {
-            logging.logToError("[BAC] Hotkey \"" + hotkeyCombo
-                + "\" did not register in any context. Set a valid combo in BAC Settings and reload.");
+        // Single context-less registration → fires for any supported context
+        // (Repeater, Proxy intercept, Proxy history, Site map) without conflicts.
+        try {
+            api.userInterface().registerHotKeyHandler(
+                HotKey.hotKey("BAC: Quick-save request", hotkeyCombo), quickSaveHandler);
+            logging.logToOutput("[BAC] BAC Time-Machine loaded. Quick-save hotkey: " + hotkeyCombo
+                + " (focus an HTTP message editor or request table, then press it).");
+        } catch (Exception e) {
+            logging.logToError("[BAC] Hotkey \"" + hotkeyCombo + "\" did not register ("
+                + e.getMessage() + "). Set a valid combo in BAC Settings and reload.");
         }
     }
 

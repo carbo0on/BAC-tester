@@ -82,11 +82,17 @@ public class TestRunTab extends JPanel {
     private final DatabaseManager dbManager;
 
     // Config
-    private JList<AccountItem> accountList;          // multi-select: run one or more accounts
+    private JComboBox<AccountScopeItem> accountScopeCombo; // one account or a whole account-folder
+    private JButton multiAccountsBtn;                      // opens a multi-select dialog
     private JComboBox<ScopeItem> scopeCombo;
     private JCheckBox safeModeCheck;
     private JButton runBtn;
     private JButton stopBtn;
+
+    // Cached account data for the picker + multi-select dialog
+    private List<AccountRepository.AccountRecord> accountsCache = new ArrayList<>();
+    private List<AccountRepository.AccountFolder> accountFoldersCache = new ArrayList<>();
+    private AccountScopeItem customSelection; // last "Custom" multi-select, if any
 
     // Sequential multi-account run queue
     private final java.util.ArrayDeque<Long> accountQueue = new java.util.ArrayDeque<>();
@@ -160,14 +166,18 @@ public class TestRunTab extends JPanel {
         // Top row: account + scope + run/stop
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
 
-        top.add(new JLabel("Accounts:"));
-        accountList = new JList<>(new DefaultListModel<>());
-        accountList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        accountList.setVisibleRowCount(3);
-        accountList.setToolTipText("Select one or more accounts — each is run in turn (Ctrl/Shift-click for multiple)");
-        JScrollPane accScroll = new JScrollPane(accountList);
-        accScroll.setPreferredSize(new Dimension(220, 62));
-        top.add(accScroll);
+        top.add(new JLabel("Account:"));
+        accountScopeCombo = new JComboBox<>();
+        accountScopeCombo.setPreferredSize(new Dimension(240, 26));
+        accountScopeCombo.setRenderer(new AccountScopeRenderer());
+        accountScopeCombo.setToolTipText(
+            "Pick one account, or a whole account-folder (runs every account inside it)");
+        top.add(accountScopeCombo);
+
+        multiAccountsBtn = new JButton("👥 Multiple…");
+        multiAccountsBtn.setToolTipText("Select several accounts / folders to run together");
+        multiAccountsBtn.addActionListener(e -> openMultiAccountDialog());
+        top.add(multiAccountsBtn);
 
         top.add(new JLabel("Scope:"));
         scopeCombo = new JComboBox<>();
@@ -385,9 +395,32 @@ public class TestRunTab extends JPanel {
         });
         searchBar.add(clearHistoryBtn);
 
+        // Collapsible container so the verdict/search/status controls can be
+        // folded away when they aren't needed (more room for the results table).
+        JPanel filtersBody = new JPanel(new BorderLayout());
+        filtersBody.add(filterBar, BorderLayout.NORTH);
+        filtersBody.add(searchBar, BorderLayout.SOUTH);
+
+        JToggleButton filtersToggle = new JToggleButton("▾  Filters");
+        filtersToggle.setSelected(true);
+        filtersToggle.setFont(filtersToggle.getFont().deriveFont(Font.BOLD, 11f));
+        filtersToggle.setHorizontalAlignment(SwingConstants.LEFT);
+        filtersToggle.setBorderPainted(false);
+        filtersToggle.setContentAreaFilled(false);
+        filtersToggle.setFocusPainted(false);
+        filtersToggle.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        filtersToggle.setToolTipText("Show / hide the verdict, search and status filters");
+        filtersToggle.addActionListener(e -> {
+            boolean show = filtersToggle.isSelected();
+            filtersBody.setVisible(show);
+            filtersToggle.setText((show ? "▾  " : "▸  ") + "Filters");
+            panel.revalidate();
+            panel.repaint();
+        });
+
         JPanel northPanel = new JPanel(new BorderLayout());
-        northPanel.add(filterBar, BorderLayout.NORTH);
-        northPanel.add(searchBar, BorderLayout.SOUTH);
+        northPanel.add(filtersToggle, BorderLayout.NORTH);
+        northPanel.add(filtersBody, BorderLayout.CENTER);
         panel.add(northPanel, BorderLayout.NORTH);
 
         // Table
@@ -570,9 +603,9 @@ public class TestRunTab extends JPanel {
     }
 
     private void startRun() {
-        List<AccountItem> selected = accountList.getSelectedValuesList();
-        if (selected.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Select one or more accounts first.",
+        AccountScopeItem selected = (AccountScopeItem) accountScopeCombo.getSelectedItem();
+        if (selected == null || selected.accountIds.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Select an account, a folder, or use 👥 Multiple…",
                 "No Account", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -587,16 +620,15 @@ public class TestRunTab extends JPanel {
 
         boolean confirmBeforeRun = !"false".equalsIgnoreCase(readSetting("confirm_before_run"));
         if (confirmBeforeRun) {
-            String who = selected.size() == 1 ? "account \"" + selected.get(0).name + "\""
-                                              : selected.size() + " accounts";
+            String who = selected.accountIds.size() == 1 ? "account \"" + selected.label + "\""
+                                              : selected.label + " (" + selected.accountIds.size() + " accounts)";
             int confirm = JOptionPane.showConfirmDialog(this,
                 "Run " + ids.size() + " test case(s) as " + who + "?",
                 "Start Run", JOptionPane.OK_CANCEL_OPTION);
             if (confirm != JOptionPane.OK_OPTION) return;
         }
 
-        List<Long> acctIds = selected.stream().map(a -> a.id).toList();
-        startQueue(acctIds, ids);
+        startQueue(selected.accountIds, ids);
     }
 
     /** Queue one or more accounts to run sequentially over the same test cases. */
@@ -661,29 +693,124 @@ public class TestRunTab extends JPanel {
         loader.submit(() -> {
             try {
                 List<AccountRepository.AccountRecord> accounts = accountRepo.getAll();
+                List<AccountRepository.AccountFolder> folders = accountRepo.getFolders();
                 SwingUtilities.invokeLater(() -> {
-                    // Preserve current selection by id
-                    java.util.Set<Long> selectedIds = new java.util.HashSet<>();
-                    for (AccountItem it : accountList.getSelectedValuesList()) selectedIds.add(it.id);
+                    accountsCache = accounts;
+                    accountFoldersCache = folders;
 
-                    DefaultListModel<AccountItem> model = new DefaultListModel<>();
-                    for (var a : accounts) model.addElement(new AccountItem(a.id(), a.name(), a.label()));
-                    accountList.setModel(model);
+                    // Remember current selection's label to restore it after rebuild.
+                    AccountScopeItem prev = (AccountScopeItem) accountScopeCombo.getSelectedItem();
+                    String prevLabel = prev != null ? prev.label : null;
 
-                    java.util.List<Integer> restore = new ArrayList<>();
-                    for (int i = 0; i < model.size(); i++)
-                        if (selectedIds.contains(model.get(i).id)) restore.add(i);
-                    if (!restore.isEmpty()) {
-                        int[] idx = restore.stream().mapToInt(Integer::intValue).toArray();
-                        accountList.setSelectedIndices(idx);
-                    } else if (model.size() == 1) {
-                        accountList.setSelectedIndex(0);
+                    DefaultComboBoxModel<AccountScopeItem> model = new DefaultComboBoxModel<>();
+
+                    // Single accounts first.
+                    for (var a : accounts)
+                        model.addElement(new AccountScopeItem(AccountScopeItem.ACCOUNT,
+                            a.label(), List.of(a.id())));
+
+                    // Then each account-folder that actually contains accounts.
+                    for (var f : folders) {
+                        List<Long> ids = accounts.stream()
+                            .filter(a -> a.folderId() != null && a.folderId() == f.id())
+                            .map(AccountRepository.AccountRecord::id).toList();
+                        if (!ids.isEmpty())
+                            model.addElement(new AccountScopeItem(AccountScopeItem.FOLDER,
+                                "Folder: " + f.name() + " (" + ids.size() + ")", ids));
                     }
+
+                    // Keep any active custom multi-selection visible/selectable.
+                    if (customSelection != null) model.addElement(customSelection);
+
+                    accountScopeCombo.setModel(model);
+
+                    // Restore previous selection by label, else default to first.
+                    if (prevLabel != null) {
+                        for (int i = 0; i < model.getSize(); i++)
+                            if (prevLabel.equals(model.getElementAt(i).label)) {
+                                accountScopeCombo.setSelectedIndex(i);
+                                return;
+                            }
+                    }
+                    if (model.getSize() > 0) accountScopeCombo.setSelectedIndex(0);
                 });
             } catch (Exception e) {
                 api.logging().logToError("[BAC] TestRunTab account load: " + e.getMessage());
             }
         });
+    }
+
+    /** Multi-select dialog: choose any combination of accounts/folders to run together. */
+    private void openMultiAccountDialog() {
+        if (accountsCache.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No accounts defined yet. Add some in the Accounts tab.",
+                "No Accounts", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        JPanel body = new JPanel();
+        body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
+        body.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+
+        Map<Long, JCheckBox> boxes = new java.util.LinkedHashMap<>();
+
+        // Group accounts under their folder; Uncategorized last.
+        java.util.function.BiConsumer<String, List<AccountRepository.AccountRecord>> addGroup = (title, members) -> {
+            if (members.isEmpty()) return;
+            JLabel hdr = new JLabel(title);
+            hdr.setFont(hdr.getFont().deriveFont(Font.BOLD));
+            hdr.setAlignmentX(Component.LEFT_ALIGNMENT);
+            hdr.setBorder(BorderFactory.createEmptyBorder(6, 0, 2, 0));
+            body.add(hdr);
+            for (var a : members) {
+                JCheckBox cb = new JCheckBox(a.label());
+                cb.setAlignmentX(Component.LEFT_ALIGNMENT);
+                cb.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
+                boxes.put(a.id(), cb);
+                body.add(cb);
+            }
+        };
+
+        for (var f : accountFoldersCache) {
+            List<AccountRepository.AccountRecord> members = accountsCache.stream()
+                .filter(a -> a.folderId() != null && a.folderId() == f.id()).toList();
+            addGroup.accept(f.name(), members);
+        }
+        List<AccountRepository.AccountRecord> uncategorized = accountsCache.stream()
+            .filter(a -> a.folderId() == null).toList();
+        addGroup.accept("Uncategorized", uncategorized);
+
+        // Pre-check whatever the current selection covers.
+        AccountScopeItem current = (AccountScopeItem) accountScopeCombo.getSelectedItem();
+        if (current != null) for (Long id : current.accountIds) {
+            JCheckBox cb = boxes.get(id);
+            if (cb != null) cb.setSelected(true);
+        }
+
+        JScrollPane scroll = new JScrollPane(body);
+        scroll.setPreferredSize(new Dimension(320, Math.min(420, 80 + boxes.size() * 26)));
+
+        int res = JOptionPane.showConfirmDialog(this, scroll,
+            "Select accounts to run together", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (res != JOptionPane.OK_OPTION) return;
+
+        List<Long> chosen = new ArrayList<>();
+        for (var e : boxes.entrySet()) if (e.getValue().isSelected()) chosen.add(e.getKey());
+        if (chosen.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No accounts selected.", "Nothing Selected",
+                JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        customSelection = new AccountScopeItem(AccountScopeItem.CUSTOM,
+            "Custom selection (" + chosen.size() + ")", chosen);
+        // Drop any previous custom entry, then add the fresh one and select it.
+        DefaultComboBoxModel<AccountScopeItem> model =
+            (DefaultComboBoxModel<AccountScopeItem>) accountScopeCombo.getModel();
+        for (int i = model.getSize() - 1; i >= 0; i--)
+            if (model.getElementAt(i).kind == AccountScopeItem.CUSTOM) model.removeElementAt(i);
+        model.addElement(customSelection);
+        accountScopeCombo.setSelectedItem(customSelection);
     }
 
     public void setOnOpenInCompare(Consumer<Long> cb) { this.onOpenInCompare = cb; }
@@ -1042,14 +1169,31 @@ public class TestRunTab extends JPanel {
 
     // ---- Helper types --------------------------------------------------
 
-    private static class AccountItem {
-        final long id;
-        final String name;
+    /** A run target: a single account, a whole account-folder, or a custom multi-select. */
+    private static class AccountScopeItem {
+        static final int ACCOUNT = 0, FOLDER = 1, CUSTOM = 2;
+        final int kind;
         final String label;
-        AccountItem(long id, String name, String label) {
-            this.id = id; this.name = name; this.label = label;
+        final List<Long> accountIds;
+        AccountScopeItem(int kind, String label, List<Long> accountIds) {
+            this.kind = kind; this.label = label; this.accountIds = accountIds;
         }
         @Override public String toString() { return label; }
+    }
+
+    /** Renders account-scope combo entries with a person/folder icon. */
+    private static class AccountScopeRenderer extends DefaultListCellRenderer {
+        @Override
+        public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                boolean isSelected, boolean cellHasFocus) {
+            super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+            if (value instanceof AccountScopeItem it) {
+                setText(it.label);
+                setIcon(it.kind == AccountScopeItem.ACCOUNT ? BacIcons.account()
+                                                            : BacIcons.folder(null));
+            }
+            return this;
+        }
     }
 
     private static class ScopeItem {

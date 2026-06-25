@@ -85,6 +85,7 @@ public class AccountsTab extends JPanel {
         accountTree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
         accountTree.setCellRenderer(new AccountTreeRenderer());
         accountTree.setRowHeight(24);
+        ToolTipManager.sharedInstance().registerComponent(accountTree); // enable per-row hover cards
         setupTreeDragDrop();
 
         buildLayout();
@@ -449,20 +450,12 @@ public class AccountsTab extends JPanel {
                 JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        // Build display strings
-        String[] options = allTestCases.stream()
-            .map(tc -> tc.method() + " " + tc.host() + extractPath(tc.url()))
-            .toArray(String[]::new);
-        String chosen = (String) JOptionPane.showInputDialog(this,
-            "Select the canary test case:", "Set Canary",
-            JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
-        if (chosen == null) return;
-        int idx = java.util.Arrays.asList(options).indexOf(chosen);
-        if (idx >= 0) {
-            TestCaseRow tc = allTestCases.get(idx);
-            selectedCanaryId = tc.id();
-            canaryLabel.setText(tc.method() + " " + tc.host());
-        }
+        // Searchable picker — far more practical than a flat combo when there are
+        // many requests or several with near-identical URLs.
+        TestCaseRow tc = CanaryPickerDialog.choose(this, allTestCases, selectedCanaryId);
+        if (tc == null) return;
+        selectedCanaryId = tc.id();
+        canaryLabel.setText(tc.method() + " " + tc.host() + extractPath(tc.url()));
     }
 
     // ---- Editor helpers ------------------------------------------------
@@ -479,7 +472,7 @@ public class AccountsTab extends JPanel {
         if (selectedCanaryId != null) {
             allTestCases.stream().filter(tc -> tc.id() == selectedCanaryId).findFirst()
                 .ifPresentOrElse(
-                    tc -> canaryLabel.setText(tc.method() + " " + tc.host()),
+                    tc -> canaryLabel.setText(tc.method() + " " + tc.host() + extractPath(tc.url())),
                     () -> canaryLabel.setText("id=" + selectedCanaryId));
         } else {
             canaryLabel.setText("Not set");
@@ -870,18 +863,6 @@ public class AccountsTab extends JPanel {
     // ---- Inner: tree cell renderer ------------------------------------
 
     private static class AccountTreeRenderer extends DefaultTreeCellRenderer {
-        private static Color tagColor(String tag) {
-            if (tag == null) return null;
-            return switch (tag.toUpperCase()) {
-                case "RED"    -> new Color(0xE0, 0x6C, 0x6C);
-                case "ORANGE" -> new Color(0xE0, 0xA0, 0x55);
-                case "YELLOW" -> new Color(0xC9, 0xB8, 0x3A);
-                case "GREEN"  -> new Color(0x5F, 0xBF, 0x5F);
-                case "BLUE"   -> new Color(0x5F, 0x96, 0xE0);
-                case "PURPLE" -> new Color(0xB0, 0x7C, 0xE0);
-                default       -> null;
-            };
-        }
 
         @Override
         public Component getTreeCellRendererComponent(JTree tree, Object value,
@@ -889,25 +870,44 @@ public class AccountsTab extends JPanel {
             super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, focus);
             Object o = (value instanceof DefaultMutableTreeNode n) ? n.getUserObject() : null;
             if (o instanceof AccountRecord a) {
-                setText("👤 " + a.id() + ":" + a.name());
-                setIcon(UIManager.getIcon("FileView.fileIcon"));
-                String access = a.expectedAccess() != null ? a.expectedAccess() : "UNKNOWN";
-                String role = a.roleDesc();
-                StringBuilder tip = new StringBuilder();
-                tip.append("Account #").append(a.id()).append("  ·  ").append(a.name());
-                if (role != null && !role.isBlank()) tip.append("  ·  Role: ").append(role.trim());
-                tip.append("  ·  Expected access: ").append(access);
-                setToolTipText(tip.toString());
+                // Show only the chosen name — no id / cookies / record clutter.
+                setText(a.name());
+                setIcon(BacIcons.account());
+                setToolTipText(buildAccountTooltip(a));
             } else if (o instanceof FolderNode fn) {
                 setText(fn.name());
-                setIcon(UIManager.getIcon("FileView.directoryIcon"));
+                // A colour-tinted folder icon makes the colour visible regardless
+                // of how the active theme handles label foreground.
+                Color c = BacIcons.tagColor(fn.color());
+                setIcon(BacIcons.folder(c));
                 setToolTipText(null);
-                if (!selected) {
-                    Color c = tagColor(fn.color());
-                    if (c != null) setForeground(c);
-                }
+                if (!selected && c != null) setForeground(c);
             }
             return this;
+        }
+
+        /** Rich hover card with the account's description, role and access. */
+        private static String buildAccountTooltip(AccountRecord a) {
+            String access = a.expectedAccess() != null ? a.expectedAccess() : "UNKNOWN";
+            String role = a.roleDesc();
+            int cookies = a.cookies() != null ? a.cookies().size() : 0;
+            int headers = a.headers() != null ? a.headers().size() : 0;
+            StringBuilder t = new StringBuilder("<html><body style='width:240px;padding:2px'>");
+            t.append("<b>").append(esc(a.name())).append("</b>");
+            if (role != null && !role.isBlank())
+                t.append("<br><span>").append(esc(role.trim())).append("</span>");
+            t.append("<hr style='margin:3px 0'>");
+            t.append("Expected access: <b>").append(esc(access)).append("</b><br>");
+            t.append("Auth material: ").append(cookies).append(" cookie(s), ")
+             .append(headers).append(" header(s)<br>");
+            t.append("Canary: ").append(a.canaryRequestId() != null ? "set" : "not set");
+            t.append("</body></html>");
+            return t.toString();
+        }
+
+        private static String esc(String s) {
+            if (s == null) return "";
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
         }
     }
 }

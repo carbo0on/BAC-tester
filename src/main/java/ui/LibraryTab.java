@@ -1267,14 +1267,14 @@ public class LibraryTab extends JPanel {
             if (value instanceof DefaultMutableTreeNode node &&
                 node.getUserObject() instanceof FolderNode fn) {
                 setText(fn.displayName());
-                setIcon(UIManager.getIcon("FileView.directoryIcon"));
+                Color c = tagColor(fn.color());
+                // A colour-tinted folder icon makes the colour visible regardless of
+                // how the active theme treats the label foreground.
+                setIcon(BacIcons.folder(c));
                 if (fn.id() == null) setIcon(UIManager.getIcon("FileView.computerIcon"));        // Inbox
                 else if (Objects.equals(fn.id(), ALL_ID)) setIcon(UIManager.getIcon("FileView.hardDriveIcon")); // All
                 // Tint the folder label by its color (only when not selected, to keep contrast).
-                if (!selected) {
-                    Color c = tagColor(fn.color());
-                    if (c != null) setForeground(c);
-                }
+                if (!selected && c != null) setForeground(c);
             }
             return this;
         }

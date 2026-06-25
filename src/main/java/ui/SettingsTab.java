@@ -106,7 +106,7 @@ public class SettingsTab extends JPanel {
         hotkeyField = new JTextField(14);
         capture.addContent(row("Quick-save hotkey:", hotkeyField,
             "Combo used to quick-save the focused request to Inbox. Same format as Burp's "
-            + "Settings (e.g. Alt+Q or Ctrl+Alt+A). Use modifiers plus a normal key; avoid the "
+            + "Settings (e.g. Ctrl+Alt+B). Use modifiers plus a normal key; avoid the "
             + "Windows/Meta key (the OS reserves it). Takes effect after you reload the extension."));
         JLabel hotkeyHint = new JLabel("Changing the hotkey requires reloading the "
             + "extension (Extensions ▸ toggle the Loaded checkbox).");
@@ -244,6 +244,22 @@ public class SettingsTab extends JPanel {
         ioPan.add(importBtn);
         io.addContent(ioPan);
         form.add(io);
+        form.add(gap(6));
+
+        // ── About ────────────────────────────────────────────────────────
+        CollapsibleSection about = new CollapsibleSection("About", "ℹ");
+        JLabel toolName = new JLabel("BAC Time-Machine");
+        toolName.setFont(toolName.getFont().deriveFont(Font.BOLD, 13f));
+        toolName.setAlignmentX(Component.LEFT_ALIGNMENT);
+        about.addContent(toolName);
+        for (String line : new String[]{
+                "Automated Broken Access Control / IDOR testing for Burp Suite.",
+                "Designed by Cataract."}) {
+            JLabel l = new JLabel(line);
+            l.setAlignmentX(Component.LEFT_ALIGNMENT);
+            about.addContent(l);
+        }
+        form.add(about);
 
         JScrollPane scroll = new JScrollPane(form);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
@@ -289,7 +305,7 @@ public class SettingsTab extends JPanel {
                             if (list != null) list.forEach(patternModel::addElement);
                         } catch (Exception ignored) {}
                     }
-                    hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Alt+Q");
+                    hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Ctrl+Alt+B");
                     if (dbPath != null) dbPathLabel.setText(dbPath);
                     else dbPathLabel.setText(api.persistence().preferences().getString("bac_db_path"));
                 });
@@ -322,8 +338,8 @@ public class SettingsTab extends JPanel {
         boolean autoExpand = autoExpandCheck.isSelected();
         boolean confirmRun = confirmRunCheck.isSelected();
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
-        String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Alt+Q";
-        final String hotkeyToSave = hotkeyRaw.isBlank() ? "Alt+Q" : hotkeyRaw;
+        String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Ctrl+Alt+B";
+        final String hotkeyToSave = hotkeyRaw.isBlank() ? "Ctrl+Alt+B" : hotkeyRaw;
         List<String> patterns = new ArrayList<>();
         for (int i = 0; i < patternModel.size(); i++) patterns.add(patternModel.get(i));
         String patternsJson = gson.toJson(patterns);

@@ -210,6 +210,11 @@ public class Extension implements BurpExtension {
                 JMenuItem importSession = new JMenuItem("Create/Update account from this request's session");
                 importSession.addActionListener(e -> importSessionFromRequest(rr));
                 items.add(importSession);
+
+                // IDOR enumeration on this request
+                JMenuItem idor = new JMenuItem("Fuzz IDOR (enumerate identifier)…");
+                idor.addActionListener(e -> openIdorFuzz(rr));
+                items.add(idor);
             }
 
             return items;
@@ -247,6 +252,24 @@ public class Extension implements BurpExtension {
                     }
                 } catch (Exception e) {
                     api.logging().logToError("[BAC] Save dialog error: " + e.getMessage());
+                }
+            });
+        }
+
+        private void openIdorFuzz(HttpRequestResponse rr) {
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    var req = rr.request();
+                    byte[] requestRaw = req.toByteArray().getBytes();
+                    var svc = req.httpService();
+                    var service = burp.api.montoya.http.HttpService.httpService(
+                        svc.host(), svc.port(), svc.secure());
+                    var accounts = accountRepo.getAll();
+                    Frame parent = api.userInterface().swingUtils().suiteFrame();
+                    ui.IdorFuzzDialog dlg = new ui.IdorFuzzDialog(api, parent, requestRaw, service, accounts);
+                    dlg.setVisible(true);
+                } catch (Exception e) {
+                    api.logging().logToError("[BAC] IDOR fuzz dialog error: " + e.getMessage());
                 }
             });
         }

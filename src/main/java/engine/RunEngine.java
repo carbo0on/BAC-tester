@@ -197,7 +197,9 @@ public class RunEngine {
         };
     }
 
-    private void loadRunSettings() {
+    /** Reloads tunables (thresholds, ignore patterns, throttle…) from settings.
+     *  Public so ad-hoc consumers (Live mode, IDOR fuzz) can refresh before replaying. */
+    public void loadRunSettings() {
         try {
             String lb = dbManager.getSetting("review_lower_bound");
             if (lb != null) greyLowerBound = Double.parseDouble(lb);
@@ -418,9 +420,16 @@ public class RunEngine {
             ? HttpRequest.httpRequest(service, ByteArray.byteArray(rawRequest))
             : HttpRequest.httpRequest(ByteArray.byteArray(rawRequest));
 
+        // Anonymous / unauthenticated identity: an account with NO cookies and NO
+        // headers represents "no session at all" (forced-browsing test). For it we
+        // strip the original cookie jar entirely instead of merging, so the old
+        // identity can't leak through and the request is genuinely unauthenticated.
+        boolean anonymous = account.cookies().isEmpty() && account.headers().isEmpty();
+
         // Preserve the original cookie jar, overriding only the account's keys.
         String originalCookie = req.headerValue("Cookie");
-        LinkedHashMap<String, String> mergedCookies = parseCookieHeader(originalCookie);
+        LinkedHashMap<String, String> mergedCookies =
+            anonymous ? new LinkedHashMap<>() : parseCookieHeader(originalCookie);
         mergedCookies.putAll(account.cookies());
 
         // Replace known session headers wholesale so the old identity can't leak.
@@ -617,6 +626,88 @@ public class RunEngine {
             Arrays.fill(curr, 0);
         }
         return prev[m];
+    }
+
+    // ---- Reflected-identity detection (BAC signal) ---------------------
+
+    /**
+     * Detects whether the attacker's response leaks victim-specific identifiers.
+     *
+     * <p>Similarity + status alone miss cases where lengths differ slightly but
+     * the victim's private data still came back. We extract candidate identifiers
+     * from the victim baseline (emails, UUIDs, long numeric IDs, bearer-ish
+     * tokens) and report any that also appear verbatim in the attacker response —
+     * a strong indication the object reference was honoured across identities.</p>
+     *
+     * @return the set of leaked identifiers (empty = none found)
+     */
+    public static Set<String> detectReflectedIdentity(byte[] victimBody, byte[] attackerBody) {
+        if (victimBody == null || attackerBody == null
+                || victimBody.length == 0 || attackerBody.length == 0) return Set.of();
+        String victim   = new String(victimBody, StandardCharsets.UTF_8);
+        String attacker = new String(attackerBody, StandardCharsets.UTF_8);
+        if (attacker.length() > 1_000_000) attacker = attacker.substring(0, 1_000_000);
+
+        Set<String> ids = extractIdentifiers(victim);
+        Set<String> leaked = new LinkedHashSet<>();
+        for (String id : ids) {
+            if (attacker.contains(id)) leaked.add(id);
+        }
+        return leaked;
+    }
+
+    private static final Pattern ID_EMAIL = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
+    private static final Pattern ID_UUID  = Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+    private static final Pattern ID_LONG_NUM = Pattern.compile("\\b\\d{5,}\\b");
+    private static final Pattern ID_TOKEN = Pattern.compile("\\b[A-Za-z0-9_-]{20,}\\b");
+
+    /** Extracts likely-identifying tokens from a body (capped to keep matching cheap). */
+    public static Set<String> extractIdentifiers(String body) {
+        Set<String> ids = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return ids;
+        if (body.length() > 1_000_000) body = body.substring(0, 1_000_000);
+        for (Pattern p : new Pattern[]{ID_EMAIL, ID_UUID, ID_LONG_NUM, ID_TOKEN}) {
+            var mtr = p.matcher(body);
+            int count = 0;
+            while (mtr.find() && count < 200) { ids.add(mtr.group()); count++; }
+        }
+        return ids;
+    }
+
+    /**
+     * Replays a saved request once under the given identity and returns the
+     * response plus a triage verdict against the supplied baseline — without
+     * touching the database. Reusable building block for passive Live mode and
+     * IDOR fuzzing. Runs on the calling thread, so call it off the EDT.
+     */
+    public ReplayOutcome replayOnce(byte[] requestRaw, HttpService service,
+                                    AccountRepository.AccountRecord account,
+                                    List<DynamicField> dyn,
+                                    byte[] baselineBody, int baselineStatus,
+                                    String expectedAccess, double matchThreshold) {
+        try {
+            HttpRequest req = buildSwappedRequestStatic(requestRaw, account, service, dyn);
+            if (req == null) return new ReplayOutcome(0, new byte[0], new byte[0], 0.0, ERROR, Set.of());
+            var rr = api.http().sendRequest(req);
+            if (rr.response() == null) return new ReplayOutcome(0, new byte[0], new byte[0], 0.0, ERROR, Set.of());
+            int status = rr.response().statusCode();
+            byte[] respRaw = rr.response().toByteArray().getBytes();
+            byte[] body = rr.response().body().getBytes();
+            double sim = computeSimilarity(baselineBody, body, ignorePatterns);
+            String verdict = computeVerdict(status, baselineStatus, sim, matchThreshold,
+                expectedAccess != null ? expectedAccess : "UNKNOWN", greyLowerBound);
+            Set<String> leaked = detectReflectedIdentity(baselineBody, body);
+            return new ReplayOutcome(status, body, respRaw, sim, verdict, leaked);
+        } catch (Exception e) {
+            api.logging().logToError("[BAC] replayOnce error: " + e.getMessage());
+            return new ReplayOutcome(0, new byte[0], new byte[0], 0.0, ERROR, Set.of());
+        }
+    }
+
+    /** Result of a single ad-hoc replay (not persisted). */
+    public record ReplayOutcome(int status, byte[] body, byte[] responseRaw,
+                                double similarity, String verdict, Set<String> leakedIdentifiers) {
+        public boolean leaksIdentity() { return leakedIdentifiers != null && !leakedIdentifiers.isEmpty(); }
     }
 
     // ---- Verdict -------------------------------------------------------

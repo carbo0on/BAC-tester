@@ -25,12 +25,17 @@ public class MainTab {
     private final AccountsTab accountsTab;
     private final TestRunTab testRunTab;
     private final CompareTab compareTab;
+    private final LiveTab liveTab;
+    private final DashboardTab dashboardTab;
 
     // Sub-tab indices
-    private static final int TAB_LIBRARY  = 0;
-    private static final int TAB_ACCOUNTS = 1;
-    private static final int TAB_TESTRUN  = 2;
-    private static final int TAB_COMPARE  = 3;
+    private static final int TAB_LIBRARY   = 0;
+    private static final int TAB_ACCOUNTS  = 1;
+    private static final int TAB_TESTRUN   = 2;
+    private static final int TAB_LIVE      = 3;
+    private static final int TAB_COMPARE   = 4;
+    private static final int TAB_DASHBOARD = 5;
+    private static final int TAB_SETTINGS  = 6;
 
     public MainTab(MontoyaApi api, DatabaseManager db,
                    CaptureService captureService, AccountRepository accountRepo) {
@@ -44,25 +49,31 @@ public class MainTab {
         libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService, db);
         accountsTab = new AccountsTab(api, accountRepo, tcRepo);
         testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
+        liveTab     = new LiveTab(api, runEngine, accountRepo, captureService, db);
         compareTab  = new CompareTab(api, db, tcRepo, runRepo, accountRepo);
+        dashboardTab = new DashboardTab(api, runRepo, tcRepo);
         ExportImportManager exportImport = new ExportImportManager(api, db);
         SettingsTab settingsTab = new SettingsTab(api, db, exportImport);
         // When settings are saved (or an import finishes), refresh the Library
         // so coloring mode / new test cases show immediately.
-        settingsTab.setOnSaved(() -> libraryTab.refresh());
+        settingsTab.setOnSaved(() -> { libraryTab.refresh(); liveTab.refreshAccounts(); });
 
         tabbedPane = new JTabbedPane();
-        tabbedPane.addTab("Library",  libraryTab);
-        tabbedPane.addTab("Accounts", accountsTab);
-        tabbedPane.addTab("Test Run", testRunTab);
-        tabbedPane.addTab("Compare",  compareTab);
-        tabbedPane.addTab("Settings", settingsTab);
+        tabbedPane.addTab("Library",   libraryTab);
+        tabbedPane.addTab("Accounts",  accountsTab);
+        tabbedPane.addTab("Test Run",  testRunTab);
+        tabbedPane.addTab("Live",      liveTab);
+        tabbedPane.addTab("Compare",   compareTab);
+        tabbedPane.addTab("Dashboard", dashboardTab);
+        tabbedPane.addTab("Settings",  settingsTab);
         // Crisp vector icons instead of emoji (consistent across platforms/themes).
-        tabbedPane.setIconAt(TAB_LIBRARY,  BacIcons.folder(new Color(0x5F, 0x96, 0xE0)));
-        tabbedPane.setIconAt(TAB_ACCOUNTS, BacIcons.account());
-        tabbedPane.setIconAt(TAB_TESTRUN,  BacIcons.dot(new Color(0x20, 0x90, 0x20)));
-        tabbedPane.setIconAt(TAB_COMPARE,  BacIcons.dot(new Color(0x5F, 0x96, 0xE0)));
-        tabbedPane.setIconAt(4,            BacIcons.dot(new Color(0x88, 0x88, 0x88)));
+        tabbedPane.setIconAt(TAB_LIBRARY,   BacIcons.folder(new Color(0x5F, 0x96, 0xE0)));
+        tabbedPane.setIconAt(TAB_ACCOUNTS,  BacIcons.account());
+        tabbedPane.setIconAt(TAB_TESTRUN,   BacIcons.dot(new Color(0x20, 0x90, 0x20)));
+        tabbedPane.setIconAt(TAB_LIVE,      BacIcons.dot(new Color(0xE0, 0x50, 0x50)));
+        tabbedPane.setIconAt(TAB_COMPARE,   BacIcons.dot(new Color(0x5F, 0x96, 0xE0)));
+        tabbedPane.setIconAt(TAB_DASHBOARD, BacIcons.dot(new Color(0xE0, 0xA0, 0x20)));
+        tabbedPane.setIconAt(TAB_SETTINGS,  BacIcons.dot(new Color(0x88, 0x88, 0x88)));
 
         // Wire Library → Compare (after tabbedPane is ready)
         libraryTab.setAccountRepository(accountRepo);
@@ -98,11 +109,16 @@ public class MainTab {
             testRunTab.refreshAccounts();
         });
 
-        // Refresh TestRunTab accounts when switching to it
+        // Refresh tabs that show live aggregates when switched to.
         tabbedPane.addChangeListener(e -> {
-            if (tabbedPane.getSelectedIndex() == TAB_TESTRUN) {
+            int idx = tabbedPane.getSelectedIndex();
+            if (idx == TAB_TESTRUN) {
                 testRunTab.refreshAccounts();
                 testRunTab.refreshScope();
+            } else if (idx == TAB_LIVE) {
+                liveTab.refreshAccounts();
+            } else if (idx == TAB_DASHBOARD) {
+                dashboardTab.refresh();
             }
         });
 
@@ -111,6 +127,9 @@ public class MainTab {
 
     public String caption()        { return "BAC Time-Machine"; }
     public Component uiComponent() { return tabbedPane; }
+
+    /** The Live tab — Extension routes Proxy traffic here for auto-replay. */
+    public LiveTab liveTab() { return liveTab; }
 
     /** Pre-fill the Accounts editor from a captured session and switch to the Accounts tab. */
     public void importAccountFromSession(Map<String, String> cookies,

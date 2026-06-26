@@ -175,6 +175,16 @@ public class TestCaseRepository {
         }
     }
 
+    /** Total number of saved test cases (for the Dashboard). */
+    public int countAll() throws SQLException {
+        synchronized (db) {
+            try (Statement st = db.getConnection().createStatement();
+                 ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM test_cases")) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
     public Optional<Long> getPrimaryBaselineId(long tcId) throws SQLException {
         synchronized (db) {
             String sql = "SELECT primary_baseline_id FROM test_cases WHERE id = ?";

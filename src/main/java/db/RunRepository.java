@@ -237,6 +237,67 @@ public class RunRepository {
         }
     }
 
+    // ---- Aggregates for Library column & Dashboard --------------------
+
+    /**
+     * Returns the latest verdict per test case (across all accounts/runs), keyed
+     * by test_case_id. Powers the "Last verdict" badge column in the Library so
+     * the user sees triage state without leaving the tab. When a test case has
+     * results under several accounts, the most severe verdict wins.
+     */
+    public Map<Long, String> getLatestVerdictPerTestCase() throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT r.test_case_id AS tcid, r.verdict AS verdict
+                FROM results r
+                WHERE r.id IN (
+                    SELECT MAX(r2.id) FROM results r2 GROUP BY r2.test_case_id, r2.account_id
+                )
+                """;
+            Map<Long, String> out = new HashMap<>();
+            try (Statement st = db.getConnection().createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next()) {
+                    long tcid = rs.getLong("tcid");
+                    String v = rs.getString("verdict");
+                    out.merge(tcid, v, RunRepository::moreSevereVerdict);
+                }
+            }
+            return out;
+        }
+    }
+
+    /** Project-wide verdict tallies (latest result per test-case/account). For the Dashboard. */
+    public Map<String, Integer> getVerdictCounts() throws SQLException {
+        synchronized (db) {
+            String sql = """
+                SELECT r.verdict AS verdict, COUNT(*) AS n
+                FROM results r
+                WHERE r.id IN (
+                    SELECT MAX(r2.id) FROM results r2 GROUP BY r2.test_case_id, r2.account_id
+                )
+                GROUP BY r.verdict
+                """;
+            Map<String, Integer> out = new LinkedHashMap<>();
+            try (Statement st = db.getConnection().createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next()) out.put(rs.getString("verdict"), rs.getInt("n"));
+            }
+            return out;
+        }
+    }
+
+    /** Severity ranking so the Library badge surfaces the scariest verdict. */
+    private static final List<String> SEVERITY = List.of(
+        "POTENTIAL_BAC", "ANOMALY", "REVIEW", "LIKELY_ENFORCED", "EXPECTED_OK", "SKIPPED_SAFE", "ERROR");
+
+    public static String moreSevereVerdict(String a, String b) {
+        int ia = SEVERITY.indexOf(a), ib = SEVERITY.indexOf(b);
+        if (ia < 0) return b;
+        if (ib < 0) return a;
+        return ia <= ib ? a : b;
+    }
+
     public List<ResultRecord> getResultsForRun(long runId) throws SQLException {
         synchronized (db) {
             String sql = """

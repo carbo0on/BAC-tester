@@ -100,6 +100,7 @@ public class TestRunTab extends JPanel {
     private boolean queuedSafeMode;
     private double  queuedThreshold;
     private int     queueTotalAccounts;
+    private volatile boolean stopRequested = false;
 
     // Progress
     private JProgressBar progressBar;
@@ -124,6 +125,8 @@ public class TestRunTab extends JPanel {
 
     // Overview matrix
     private OverviewMatrix overviewMatrix;
+    /** Debounce so a burst of streaming results triggers one matrix refresh (#9). */
+    private javax.swing.Timer matrixRefreshTimer;
 
     // Async loader for UI data
     private final ExecutorService loader = Executors.newSingleThreadExecutor(r -> {
@@ -198,9 +201,13 @@ public class TestRunTab extends JPanel {
         stopBtn.setForeground(new Color(180, 0, 0));
         stopBtn.setEnabled(false);
         stopBtn.addActionListener(e -> {
-            // Engine doesn't have a stop signal; just disable the button
-            // (the current test case finishes then the run ends naturally — see engine TODO)
+            // Signal the engine to stop after the in-flight request and drain any
+            // remaining queued accounts so the run actually halts.
+            stopRequested = true;
+            engine.requestStop();
+            accountQueue.clear();
             statusLabel.setText("Stopping after current request…");
+            statusLabel.setForeground(new Color(180, 90, 0));
             stopBtn.setEnabled(false);
         });
         top.add(stopBtn);
@@ -259,19 +266,20 @@ public class TestRunTab extends JPanel {
             BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
             BorderFactory.createEmptyBorder(2, 4, 2, 4)));
 
-        // Initialize counts and create one chip per verdict
+        // Initialize counts and create one chip per verdict (vector dot + plain text)
         String[][] verdictDefs = {
-            {RunEngine.POTENTIAL_BAC,   "🚩 BAC",     "CC2222"},
-            {RunEngine.ANOMALY,         "⚠ ANOMALY",  "CC7700"},
-            {RunEngine.REVIEW,          "🔍 REVIEW",  "AA9900"},
-            {RunEngine.LIKELY_ENFORCED, "✅ ENFORCED","227722"},
-            {RunEngine.EXPECTED_OK,     "⚪ OK",       "777777"},
-            {RunEngine.SKIPPED_SAFE,    "— SKIPPED",  "555555"},
-            {RunEngine.ERROR,           "✗ ERROR",    "882288"},
+            {RunEngine.POTENTIAL_BAC,   "BAC",      "CC2222"},
+            {RunEngine.ANOMALY,         "ANOMALY",  "CC7700"},
+            {RunEngine.REVIEW,          "REVIEW",   "AA9900"},
+            {RunEngine.LIKELY_ENFORCED, "ENFORCED", "227722"},
+            {RunEngine.EXPECTED_OK,     "OK",       "777777"},
+            {RunEngine.SKIPPED_SAFE,    "SKIPPED",  "555555"},
+            {RunEngine.ERROR,           "ERROR",    "882288"},
         };
         for (String[] def : verdictDefs) {
             verdictCounts.put(def[0], 0);
-            JLabel chip = new JLabel(def[1] + ": 0");
+            JLabel chip = new JLabel(def[1] + ": 0", BacIcons.verdictDot(def[0]), SwingConstants.LEFT);
+            chip.setIconTextGap(4);
             chip.setFont(chip.getFont().deriveFont(11f));
             chip.setBorder(BorderFactory.createEmptyBorder(1, 5, 1, 5));
             chip.setForeground(new Color(Integer.parseInt(def[2], 16)));
@@ -286,34 +294,28 @@ public class TestRunTab extends JPanel {
         verdictCounts.merge(verdict, 1, Integer::sum);
         JLabel lbl = verdictCountLabels.get(verdict);
         if (lbl == null) return;
-        String display = switch (verdict) {
-            case RunEngine.POTENTIAL_BAC   -> "🚩 BAC";
-            case RunEngine.ANOMALY         -> "⚠ ANOMALY";
-            case RunEngine.REVIEW          -> "🔍 REVIEW";
-            case RunEngine.LIKELY_ENFORCED -> "✅ ENFORCED";
-            case RunEngine.EXPECTED_OK     -> "⚪ OK";
-            case RunEngine.SKIPPED_SAFE    -> "— SKIPPED";
-            case RunEngine.ERROR           -> "✗ ERROR";
-            default -> verdict;
-        };
-        lbl.setText(display + ": " + verdictCounts.get(verdict));
+        lbl.setText(verdictChipName(verdict) + ": " + verdictCounts.get(verdict));
     }
 
     private void resetVerdictCounts() {
         verdictCounts.replaceAll((k, v) -> 0);
         for (var entry : verdictCountLabels.entrySet()) {
-            String display = switch (entry.getKey()) {
-                case RunEngine.POTENTIAL_BAC   -> "🚩 BAC";
-                case RunEngine.ANOMALY         -> "⚠ ANOMALY";
-                case RunEngine.REVIEW          -> "🔍 REVIEW";
-                case RunEngine.LIKELY_ENFORCED -> "✅ ENFORCED";
-                case RunEngine.EXPECTED_OK     -> "⚪ OK";
-                case RunEngine.SKIPPED_SAFE    -> "— SKIPPED";
-                case RunEngine.ERROR           -> "✗ ERROR";
-                default -> entry.getKey();
-            };
-            entry.getValue().setText(display + ": 0");
+            entry.getValue().setText(verdictChipName(entry.getKey()) + ": 0");
         }
+    }
+
+    /** Short, emoji-free chip name for a verdict (the dot icon carries the colour). */
+    private static String verdictChipName(String verdict) {
+        return switch (verdict) {
+            case RunEngine.POTENTIAL_BAC   -> "BAC";
+            case RunEngine.ANOMALY         -> "ANOMALY";
+            case RunEngine.REVIEW          -> "REVIEW";
+            case RunEngine.LIKELY_ENFORCED -> "ENFORCED";
+            case RunEngine.EXPECTED_OK     -> "OK";
+            case RunEngine.SKIPPED_SAFE    -> "SKIPPED";
+            case RunEngine.ERROR           -> "ERROR";
+            default -> verdict;
+        };
     }
 
     private void applyResultsFilter() {
@@ -387,6 +389,13 @@ public class TestRunTab extends JPanel {
         colsBtn.setToolTipText("Show / hide columns and restore the default layout");
         searchBar.add(colsBtn);
 
+        JButton reportBtn = new JButton("⤓ Report");
+        reportBtn.setFont(reportBtn.getFont().deriveFont(11f));
+        reportBtn.setToolTipText("Export the currently shown results as an HTML findings report");
+        reportBtn.addActionListener(e ->
+            ReportExporter.export(this, api, tcRepo, tableModel.visibleResults()));
+        searchBar.add(reportBtn);
+
         JButton clearHistoryBtn = new JButton("🗑 Clear history");
         clearHistoryBtn.setFont(clearHistoryBtn.getFont().deriveFont(11f));
         clearHistoryBtn.setToolTipText("Remove all rows from this results view (kept across runs otherwise)");
@@ -439,7 +448,11 @@ public class TestRunTab extends JPanel {
         // Header right-click also opens the column chooser
         resultsTable.getTableHeader().addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { maybe(e); }
-            @Override public void mouseReleased(MouseEvent e) { maybe(e); }
+            @Override public void mouseReleased(MouseEvent e) {
+                maybe(e);
+                // Persist any column-width drag the user just finished (#14).
+                if (!e.isPopupTrigger() && columnManager != null) columnManager.saveState();
+            }
             private void maybe(MouseEvent e) {
                 if (e.isPopupTrigger()) columnManager.showMenu(e.getComponent(), e.getX(), e.getY());
             }
@@ -559,6 +572,7 @@ public class TestRunTab extends JPanel {
             SwingUtilities.invokeLater(() -> {
                 tableModel.addResult(result);
                 incrementVerdictCount(result.verdict());
+                scheduleMatrixRefresh(); // keep the matrix live during a run (#9)
             })
         );
 
@@ -573,17 +587,22 @@ public class TestRunTab extends JPanel {
                     statusLabel.setForeground(new Color(200, 60, 0));
                     JOptionPane.showMessageDialog(this, error,
                         "Run Failed", JOptionPane.WARNING_MESSAGE);
-                } else if (!accountQueue.isEmpty()) {
+                } else if (!stopRequested && !accountQueue.isEmpty()) {
                     // More accounts queued — keep going (history is preserved).
                     if (overviewMatrix != null) overviewMatrix.refresh();
                     runNextAccount();
                 } else {
                     runBtn.setEnabled(true);
                     stopBtn.setEnabled(false);
-                    statusLabel.setText(queueTotalAccounts > 1
-                        ? "✓ Done — " + queueTotalAccounts + " accounts"
-                        : "✓ Done — run #" + runId);
-                    statusLabel.setForeground(new Color(0, 140, 0));
+                    if (stopRequested) {
+                        statusLabel.setText("■ Stopped by user");
+                        statusLabel.setForeground(new Color(180, 90, 0));
+                    } else {
+                        statusLabel.setText(queueTotalAccounts > 1
+                            ? "✓ Done — " + queueTotalAccounts + " accounts"
+                            : "✓ Done — run #" + runId);
+                        statusLabel.setForeground(new Color(0, 140, 0));
+                    }
                     if (resultsTable.getRowCount() > 0) resultsTable.setRowSelectionInterval(0, 0);
                     if (overviewMatrix != null) overviewMatrix.refresh();
                 }
@@ -642,13 +661,52 @@ public class TestRunTab extends JPanel {
         startQueue(selected.accountIds, ids);
     }
 
-    /** Queue one or more accounts to run sequentially over the same test cases. */
+    /**
+     * Queue one or more accounts to run sequentially over the same test cases.
+     * First warns (off the EDT) about any account that has no canary configured,
+     * since without one an expired session can't be detected (#7).
+     */
     private void startQueue(List<Long> accountIds, List<Long> tcIds) {
         if (engine.isRunning()) {
             JOptionPane.showMessageDialog(this, "A run is already in progress.",
                 "Busy", JOptionPane.WARNING_MESSAGE);
             return;
         }
+        boolean warn = !"false".equalsIgnoreCase(readSetting("warn_missing_canary"));
+        if (!warn) { proceedQueue(accountIds, tcIds); return; }
+
+        loader.submit(() -> {
+            List<String> missing = new ArrayList<>();
+            try {
+                for (Long id : accountIds) {
+                    var a = accountRepo.getById(id).orElse(null);
+                    if (a != null && a.canaryRequestId() == null) missing.add(a.name());
+                }
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Canary presence check: " + ex.getMessage());
+            }
+            SwingUtilities.invokeLater(() -> {
+                if (!missing.isEmpty()) {
+                    int ok = JOptionPane.showConfirmDialog(this,
+                        "These accounts have no canary configured:\n  " + String.join(", ", missing)
+                        + "\n\nWithout a canary an expired session can't be detected, so results may be"
+                        + " false. Proceed anyway?",
+                        "No canary configured", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    if (ok != JOptionPane.YES_OPTION) return;
+                }
+                proceedQueue(accountIds, tcIds);
+            });
+        });
+    }
+
+    /** Actually arms the queue and starts the first account. */
+    private void proceedQueue(List<Long> accountIds, List<Long> tcIds) {
+        if (engine.isRunning()) {
+            JOptionPane.showMessageDialog(this, "A run is already in progress.",
+                "Busy", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        stopRequested = false;
         accountQueue.clear();
         accountQueue.addAll(accountIds);
         queuedTcIds       = tcIds;
@@ -681,6 +739,18 @@ public class TestRunTab extends JPanel {
         statusLabel.setText("Running account " + idx + " / " + queueTotalAccounts + "…");
         statusLabel.setForeground(UIManager.getColor("Label.foreground"));
         engine.startRun(accountId, queuedTcIds, queuedSafeMode, queuedThreshold);
+    }
+
+    /** Coalesces streaming-result refreshes into a single matrix reload. */
+    private void scheduleMatrixRefresh() {
+        if (overviewMatrix == null) return;
+        if (matrixRefreshTimer == null) {
+            matrixRefreshTimer = new javax.swing.Timer(400, e -> {
+                if (overviewMatrix != null) overviewMatrix.refresh();
+            });
+            matrixRefreshTimer.setRepeats(false);
+        }
+        matrixRefreshTimer.restart();
     }
 
     private double readMatchThreshold() {
@@ -989,15 +1059,22 @@ public class TestRunTab extends JPanel {
             return row >= 0 && row < rows.size() ? rows.get(row).rec : null;
         }
 
+        /** The results currently shown (after filtering) — used by the report export. */
+        List<RunRepository.ResultRecord> visibleResults() {
+            List<RunRepository.ResultRecord> out = new ArrayList<>(rows.size());
+            for (Row row : rows) out.add(row.rec);
+            return out;
+        }
+
         private static String verdictLabel(String v) {
             return switch (v) {
-                case RunEngine.POTENTIAL_BAC   -> "🚩 POTENTIAL_BAC";
-                case RunEngine.LIKELY_ENFORCED -> "✅ LIKELY_ENFORCED";
-                case RunEngine.EXPECTED_OK     -> "⚪ EXPECTED_OK";
-                case RunEngine.ANOMALY         -> "⚠ ANOMALY";
-                case RunEngine.REVIEW          -> "🔍 REVIEW";
-                case RunEngine.SKIPPED_SAFE    -> "— SKIPPED";
-                case RunEngine.ERROR           -> "✗ ERROR";
+                case RunEngine.POTENTIAL_BAC   -> "POTENTIAL_BAC";
+                case RunEngine.LIKELY_ENFORCED -> "LIKELY_ENFORCED";
+                case RunEngine.EXPECTED_OK     -> "EXPECTED_OK";
+                case RunEngine.ANOMALY         -> "ANOMALY";
+                case RunEngine.REVIEW          -> "REVIEW";
+                case RunEngine.SKIPPED_SAFE    -> "SKIPPED";
+                case RunEngine.ERROR           -> "ERROR";
                 default -> v;
             };
         }
@@ -1079,7 +1156,49 @@ public class TestRunTab extends JPanel {
                 all[i] = tc;
                 visible[i] = true;
             }
-            restoreDefault();
+            loadState();
+        }
+
+        /** Restores persisted visibility + widths, falling back to defaults (#14). */
+        private void loadState() {
+            String json = null;
+            try { json = dbManager.getSetting("results_columns"); } catch (Exception ignored) {}
+            if (json == null || json.isBlank()) { restoreDefault(); return; }
+            try {
+                java.lang.reflect.Type type =
+                    new com.google.gson.reflect.TypeToken<Map<String, int[]>>(){}.getType();
+                Map<String, int[]> state = new com.google.gson.Gson().fromJson(json, type);
+                if (state == null || state.isEmpty()) { restoreDefault(); return; }
+                int shown = 0;
+                for (int i = 0; i < all.length; i++) {
+                    int[] v = state.get(RESULT_COLS[i]);
+                    if (v != null && v.length >= 2) {
+                        visible[i] = v[0] != 0;
+                        all[i].setPreferredWidth(v[1] > 0 ? v[1]
+                            : (i < defaultWidths.length ? defaultWidths[i] : 100));
+                    } else {
+                        visible[i] = true;
+                        all[i].setPreferredWidth(i < defaultWidths.length ? defaultWidths[i] : 100);
+                    }
+                    if (visible[i]) shown++;
+                }
+                if (shown == 0) for (int i = 0; i < visible.length; i++) visible[i] = true;
+                rebuild();
+            } catch (Exception e) { restoreDefault(); }
+        }
+
+        /** Persists current visibility + widths (off the EDT). */
+        void saveState() {
+            Map<String, int[]> state = new java.util.LinkedHashMap<>();
+            for (int i = 0; i < all.length; i++) {
+                int w = all[i].getWidth() > 0 ? all[i].getWidth() : all[i].getPreferredWidth();
+                state.put(RESULT_COLS[i], new int[]{visible[i] ? 1 : 0, w});
+            }
+            final String json = new com.google.gson.Gson().toJson(state);
+            loader.submit(() -> {
+                try { dbManager.setSetting("results_columns", json); }
+                catch (Exception ignored) {}
+            });
         }
 
         void showMenu(Component invoker)                 { buildMenu().show(invoker, 0, invoker.getHeight()); }
@@ -1110,6 +1229,7 @@ public class TestRunTab extends JPanel {
             }
             visible[modelIdx] = show;
             rebuild();
+            saveState();
         }
 
         private void restoreDefault() {
@@ -1118,6 +1238,7 @@ public class TestRunTab extends JPanel {
                 all[i].setPreferredWidth(i < defaultWidths.length ? defaultWidths[i] : 100);
             }
             rebuild();
+            saveState();
         }
 
         /** Rebuild the column model from scratch in model-index order. */
@@ -1136,18 +1257,23 @@ public class TestRunTab extends JPanel {
                 boolean isSelected, boolean hasFocus, int row, int col) {
             Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
 
-            if (!isSelected) {
-                ResultsTableModel model = (ResultsTableModel) table.getModel();
-                RunRepository.ResultRecord rec = model.getRow(row);
-                if (rec != null) {
-                    Color bg = verdictColor(rec.verdict());
-                    if (bg != null) {
-                        Color base = table.getBackground();
-                        c.setBackground(blend(bg, base));
-                    } else {
-                        c.setBackground(table.getBackground());
-                    }
+            ResultsTableModel model = (ResultsTableModel) table.getModel();
+            RunRepository.ResultRecord rec = model.getRow(row);
+
+            // Draw a crisp verdict dot in the Verdict column (model index 0).
+            if (c instanceof JLabel lbl) {
+                if (rec != null && table.convertColumnIndexToModel(col) == 0) {
+                    lbl.setIcon(BacIcons.verdictDot(rec.verdict()));
+                    lbl.setHorizontalAlignment(SwingConstants.LEADING);
+                    lbl.setIconTextGap(6);
+                } else {
+                    lbl.setIcon(null);
                 }
+            }
+
+            if (!isSelected && rec != null) {
+                Color bg = verdictColor(rec.verdict());
+                c.setBackground(bg != null ? blend(bg, table.getBackground()) : table.getBackground());
             }
             return c;
         }

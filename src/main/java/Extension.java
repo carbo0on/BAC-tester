@@ -79,9 +79,9 @@ public class Extension implements BurpExtension {
                                        new FolderRepository(dbManager)));
 
         // --- 6. Hotkey: quick-save to Inbox (configurable in Settings) ---
-        // Default is Ctrl+Alt+B. The combo is read from the settings table so
-        // users can rebind it; changing it takes effect after the extension is
-        // reloaded.
+        // Default is Ctrl+Alt+B (matches the DB default and the Settings hint).
+        // The combo is read from the settings table so users can rebind it;
+        // changing it takes effect after the extension is reloaded.
         //
         // NOTE: previous versions registered the SAME combo in three separate
         // contexts at once, which Burp treats as a conflict and silently

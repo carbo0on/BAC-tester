@@ -34,6 +34,10 @@ public class SettingsTab extends JPanel {
     private JSpinner reviewBoundSpinner;
     private JCheckBox safeModeCheck;
     private JComboBox<String> safeModeScopeCombo;
+    private JSpinner runThreadsSpinner;
+    private JSpinner runDelaySpinner;
+    private JCheckBox warnCanaryCheck;
+    private JCheckBox detectLoginCheck;
     private JSpinner fontSizeSpinner;
     private JSpinner diffCapSpinner;
     private JComboBox<String> coloringCombo;
@@ -101,9 +105,28 @@ public class SettingsTab extends JPanel {
         confirmRunCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
         runSafety.addContent(confirmRunCheck);
 
+        warnCanaryCheck = new JCheckBox("Warn before running an account that has no canary configured");
+        warnCanaryCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
+        runSafety.addContent(warnCanaryCheck);
+
+        detectLoginCheck = new JCheckBox("Treat a 200 login page as an expired session (canary body check)");
+        detectLoginCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
+        runSafety.addContent(detectLoginCheck);
+
         scopeCombo = new JComboBox<>(new String[]{"WARN", "BLOCK", "OFF"});
         runSafety.addContent(row("Out-of-scope handling:", scopeCombo,
             "WARN: log and continue · BLOCK: skip out-of-scope requests · OFF: ignore scope"));
+
+        runThreadsSpinner = new JSpinner(new SpinnerNumberModel(1, 1, 16, 1));
+        runThreadsSpinner.setPreferredSize(new Dimension(60, runThreadsSpinner.getPreferredSize().height));
+        runSafety.addContent(row("Concurrent requests:", runThreadsSpinner,
+            "How many requests a run sends in parallel (1 = sequential). Higher is faster "
+            + "but heavier on the target."));
+
+        runDelaySpinner = new JSpinner(new SpinnerNumberModel(0, 0, 60000, 50));
+        runDelaySpinner.setPreferredSize(new Dimension(80, runDelaySpinner.getPreferredSize().height));
+        runSafety.addContent(row("Throttle delay (ms):", runDelaySpinner,
+            "Delay applied before each request during a run (0 = none). Use to avoid rate limits."));
         form.add(runSafety);
         form.add(gap(6));
 
@@ -289,6 +312,10 @@ public class SettingsTab extends JPanel {
                 String autoExpand  = db.getSetting("auto_expand_folders");
                 String confirmRun  = db.getSetting("confirm_before_run");
                 String dedup       = db.getSetting("dedup_on_import");
+                String runThreads  = db.getSetting("run_threads");
+                String runDelay    = db.getSetting("run_delay_ms");
+                String warnCanary  = db.getSetting("warn_missing_canary");
+                String detectLogin = db.getSetting("canary_detect_login_body");
                 String patterns    = db.getSetting("ignore_patterns");
                 String dbPath      = db.getSetting("db_path");
                 String hotkey      = db.getSetting("hotkey_combo");
@@ -302,6 +329,10 @@ public class SettingsTab extends JPanel {
                     if (safeScope != null) safeModeScopeCombo.setSelectedItem(safeScope.trim().toUpperCase());
                     autoExpandCheck.setSelected(!"false".equalsIgnoreCase(autoExpand));
                     confirmRunCheck.setSelected(!"false".equalsIgnoreCase(confirmRun));
+                    warnCanaryCheck.setSelected(!"false".equalsIgnoreCase(warnCanary));
+                    detectLoginCheck.setSelected(!"false".equalsIgnoreCase(detectLogin));
+                    setSpinner(runThreadsSpinner, runThreads);
+                    setSpinner(runDelaySpinner, runDelay);
                     dedupCheckSetSelected(dedup);
                     if (coloring != null) coloringCombo.setSelectedItem(coloring);
                     if (scope != null) scopeCombo.setSelectedItem(scope);
@@ -346,6 +377,10 @@ public class SettingsTab extends JPanel {
         String defAccess   = (String) defaultAccessCombo.getSelectedItem();
         boolean autoExpand = autoExpandCheck.isSelected();
         boolean confirmRun = confirmRunCheck.isSelected();
+        boolean warnCanary = warnCanaryCheck.isSelected();
+        boolean detectLogin = detectLoginCheck.isSelected();
+        int runThreads     = (Integer) runThreadsSpinner.getValue();
+        int runDelay       = (Integer) runDelaySpinner.getValue();
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
         String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Ctrl+Alt+B";
         final String hotkeyToSave = hotkeyRaw.isBlank() ? "Ctrl+Alt+B" : hotkeyRaw;
@@ -366,6 +401,10 @@ public class SettingsTab extends JPanel {
                 db.setSetting("default_expected_access", defAccess);
                 db.setSetting("auto_expand_folders", String.valueOf(autoExpand));
                 db.setSetting("confirm_before_run", String.valueOf(confirmRun));
+                db.setSetting("warn_missing_canary", String.valueOf(warnCanary));
+                db.setSetting("canary_detect_login_body", String.valueOf(detectLogin));
+                db.setSetting("run_threads", String.valueOf(runThreads));
+                db.setSetting("run_delay_ms", String.valueOf(runDelay));
                 db.setSetting("dedup_on_import", String.valueOf(dedup));
                 db.setSetting("hotkey_combo", hotkeyToSave);
                 db.setSetting("ignore_patterns", patternsJson);

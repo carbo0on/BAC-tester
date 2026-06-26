@@ -79,13 +79,13 @@ public class DatabaseManager {
         // Folder coloring (Library tree) and account folders/coloring.
         addColumnIfMissing("folders", "color", "TEXT");
         addColumnIfMissing("accounts", "folder_id", "INTEGER");
-        // Migrate previous default quick-save hotkeys to the current Alt+Q default.
+        // Unify the quick-save hotkey default on Ctrl+Alt+B across the codebase.
         // Only rewrite known former defaults so a user's custom combo is preserved.
         try (PreparedStatement ps = connection.prepareStatement(
-                "UPDATE settings SET value = 'Alt+Q' WHERE key = 'hotkey_combo' "
-                + "AND value IN ('Ctrl+Alt+A', 'Alt+Meta')")) {
+                "UPDATE settings SET value = 'Ctrl+Alt+B' WHERE key = 'hotkey_combo' "
+                + "AND value IN ('Ctrl+Alt+A', 'Alt+Meta', 'Alt+Q')")) {
             int n = ps.executeUpdate();
-            if (n > 0) logging.logToOutput("[BAC] Migration: quick-save hotkey default updated to Alt+Q");
+            if (n > 0) logging.logToOutput("[BAC] Migration: quick-save hotkey default updated to Ctrl+Alt+B");
         }
     }
 
@@ -236,7 +236,12 @@ public class DatabaseManager {
                 {"safe_mode",        "true"},
                 {"safe_mode_scope",  "DELETE"},   // DELETE (lenient) / ALL (strict: skip all state-changing)
                 {"font_size",        "12"},
-                {"hotkey_combo",     "Alt+Q"},   // quick-save (configurable in Settings)
+                {"hotkey_combo",     "Ctrl+Alt+B"},   // quick-save (configurable in Settings)
+                // Run engine performance / safety
+                {"run_threads",      "1"},        // concurrent in-flight requests during a run (1–16)
+                {"run_delay_ms",     "0"},        // throttle: delay before each request (ms)
+                {"warn_missing_canary", "true"},  // warn before running an account that has no canary
+                {"canary_detect_login_body", "true"}, // treat a 200 login page as an expired session
                 // Phase 7.1 additions
                 {"coloring_mode",    "AUTO"},   // AUTO (by method) / MANUAL / OFF
                 {"review_lower_bound", "60"},    // grey-zone lower bound for REVIEW verdict

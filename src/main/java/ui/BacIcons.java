@@ -38,6 +38,49 @@ final class BacIcons {
     /** A simple coloured swatch (rounded square) — handy as a colour legend. */
     static Icon swatch(Color color) { return new SwatchIcon(color); }
 
+    /** A small filled status dot (null colour → a hollow neutral ring). */
+    static Icon dot(Color color) { return new DotIcon(color); }
+
+    // ---- Verdict / method palettes (solid, for icons) -----------------------
+
+    /** Solid colour for a run verdict (null when the verdict has no badge). */
+    static Color verdictColor(String verdict) {
+        if (verdict == null) return null;
+        return switch (verdict) {
+            case "POTENTIAL_BAC"   -> new Color(0xC8, 0x30, 0x30); // red
+            case "LIKELY_ENFORCED" -> new Color(0x20, 0x90, 0x20); // green
+            case "EXPECTED_OK"     -> new Color(0x88, 0x88, 0x88); // grey
+            case "ANOMALY"         -> new Color(0xC8, 0x70, 0x00); // orange
+            case "REVIEW"          -> new Color(0xB0, 0x9A, 0x00); // amber
+            case "SKIPPED_SAFE"    -> new Color(0x70, 0x70, 0x70); // dim grey
+            case "ERROR"           -> new Color(0x90, 0x30, 0x90); // purple
+            default -> null;
+        };
+    }
+
+    /** A verdict status dot, or null when the verdict has no badge. */
+    static Icon verdictDot(String verdict) {
+        Color c = verdictColor(verdict);
+        return c != null ? new DotIcon(c) : null;
+    }
+
+    /** Danger colour for a state-changing HTTP method (null = neutral/safe). */
+    static Color dangerColor(String method) {
+        if (method == null) return null;
+        return switch (method.toUpperCase()) {
+            case "DELETE"       -> new Color(0xC8, 0x30, 0x30); // red
+            case "PUT", "PATCH" -> new Color(0xC8, 0x70, 0x00); // orange
+            case "POST"         -> new Color(0xC9, 0xB8, 0x3A); // yellow
+            default             -> null;
+        };
+    }
+
+    /** A danger badge for a method, or null for safe methods (GET/HEAD/OPTIONS). */
+    static Icon dangerDot(String method) {
+        Color c = dangerColor(method);
+        return c != null ? new DotIcon(c) : null;
+    }
+
     // ---- implementations ----------------------------------------------------
 
     private static final class AccountIcon implements Icon {
@@ -70,6 +113,27 @@ final class BacIcons {
             g2.fillRoundRect(x + 1, y + 5, 14, 9, 3, 3);  // body
             g2.setColor(base.darker());
             g2.drawRoundRect(x + 1, y + 5, 13, 8, 3, 3);  // outline
+            g2.dispose();
+        }
+    }
+
+    private static final class DotIcon implements Icon {
+        private final Color color;
+        DotIcon(Color color) { this.color = color; }
+        @Override public int getIconWidth()  { return 12; }
+        @Override public int getIconHeight() { return 12; }
+        @Override public void paintIcon(Component c, Graphics g, int x, int y) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            if (color != null) {
+                g2.setColor(color);
+                g2.fillOval(x + 1, y + 2, 9, 9);
+                g2.setColor(color.darker());
+                g2.drawOval(x + 1, y + 2, 9, 9);
+            } else {
+                g2.setColor(UIManager.getColor("Label.disabledForeground"));
+                g2.drawOval(x + 1, y + 2, 8, 8);
+            }
             g2.dispose();
         }
     }

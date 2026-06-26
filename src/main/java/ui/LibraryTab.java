@@ -205,9 +205,14 @@ public class LibraryTab extends JPanel {
                 List<FolderRecord> folders = folderRepo.getAllFolders();
                 int inboxCount = folderRepo.countInbox();
                 List<TestCaseRow> rows = loadRows();
+                Map<Long, String> verdicts;
+                try { verdicts = new db.RunRepository(db).getLatestVerdictPerTestCase(); }
+                catch (Exception ex) { verdicts = new HashMap<>(); }
+                final Map<Long, String> fVerdicts = verdicts;
                 SwingUtilities.invokeLater(() -> {
                     rebuildTree(folders, inboxCount);
                     allRows = rows;
+                    tableModel.setVerdicts(fVerdicts);
                     applyFilter();
                 });
             } catch (Exception e) {
@@ -730,8 +735,9 @@ public class LibraryTab extends JPanel {
         cm.getColumn(4).setPreferredWidth(190);                                     // path
         cm.getColumn(5).setPreferredWidth(60);  cm.getColumn(5).setMaxWidth(90);   // status
         cm.getColumn(6).setPreferredWidth(65);  cm.getColumn(6).setMaxWidth(85);   // size
-        cm.getColumn(7).setPreferredWidth(140);                                     // notes
-        cm.getColumn(8).setPreferredWidth(125); cm.getColumn(8).setMaxWidth(145);  // captured
+        cm.getColumn(7).setPreferredWidth(85);  cm.getColumn(7).setMaxWidth(105);  // verdict
+        cm.getColumn(8).setPreferredWidth(140);                                     // notes
+        cm.getColumn(9).setPreferredWidth(125); cm.getColumn(9).setMaxWidth(145);  // captured
     }
 
     private JPanel buildActionBar() {
@@ -1211,10 +1217,13 @@ public class LibraryTab extends JPanel {
 
     private static class TestCaseTableModel extends javax.swing.table.AbstractTableModel {
         private static final String[] COLS =
-            {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Notes", "Captured"};
+            {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Verdict", "Notes", "Captured"};
         private List<TestCaseRow> rows = new ArrayList<>();
+        private Map<Long, String> verdicts = new HashMap<>();
 
         void setRows(List<TestCaseRow> rows) { this.rows = rows; fireTableDataChanged(); }
+        void setVerdicts(Map<Long, String> v) { this.verdicts = v != null ? v : new HashMap<>(); fireTableDataChanged(); }
+        String verdictFor(long tcId) { return verdicts.get(tcId); }
         TestCaseRow getRow(int i) { return rows.get(i); }
 
         @Override public int getRowCount()    { return rows.size(); }
@@ -1232,8 +1241,9 @@ public class LibraryTab extends JPanel {
                 case 4 -> extractPath(r.url());
                 case 5 -> r.primaryBaselineStatus() != null ? String.valueOf(r.primaryBaselineStatus()) : "—";
                 case 6 -> r.primaryBaselineLength() != null ? formatSize(r.primaryBaselineLength()) : "—";
-                case 7 -> r.notes() != null ? r.notes().replaceAll("\\s+", " ").trim() : "";
-                case 8 -> DATE_FMT.format(Instant.ofEpochSecond(r.capturedAt()));
+                case 7 -> { String v = verdicts.get(r.id()); yield v != null ? VerdictStyle.shortLabel(v) : "—"; }
+                case 8 -> r.notes() != null ? r.notes().replaceAll("\\s+", " ").trim() : "";
+                case 9 -> DATE_FMT.format(Instant.ofEpochSecond(r.capturedAt()));
                 default -> "";
             };
         }
@@ -1300,7 +1310,11 @@ public class LibraryTab extends JPanel {
                 }
 
                 if (!selected) {
-                    Color bg = rowBackground(rowData);
+                    // The Verdict cell is tinted by its own triage color so flagged
+                    // rows stand out; every other cell uses the method/tag row color.
+                    String verdict = modelCol == 7 ? tableModel.verdictFor(rowData.id()) : null;
+                    Color vbg = verdict != null ? VerdictStyle.color(verdict) : null;
+                    Color bg = vbg != null ? vbg : rowBackground(rowData);
                     lbl.setBackground(bg != null ? blend(t.getBackground(), bg) : t.getBackground());
                     lbl.setOpaque(true);
                 }

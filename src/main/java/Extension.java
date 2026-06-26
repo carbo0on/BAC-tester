@@ -1,5 +1,11 @@
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ToolType;
+import burp.api.montoya.http.handler.HttpHandler;
+import burp.api.montoya.http.handler.HttpRequestToBeSent;
+import burp.api.montoya.http.handler.HttpResponseReceived;
+import burp.api.montoya.http.handler.RequestToBeSentAction;
+import burp.api.montoya.http.handler.ResponseReceivedAction;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.logging.Logging;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
@@ -77,6 +83,30 @@ public class Extension implements BurpExtension {
         api.userInterface().registerContextMenuItemsProvider(
             new BacContextMenuProvider(api, capture, accountRepo,
                                        new FolderRepository(dbManager)));
+
+        // --- 5b. Passive Live mode: route Proxy responses to the Live tab ---
+        // Only Proxy traffic is forwarded (our own replayed requests are sent
+        // via the Extensions tool, so they never re-enter and loop). The Live
+        // tab decides whether testing is enabled and does the replay off-thread.
+        api.http().registerHttpHandler(new HttpHandler() {
+            @Override public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent req) {
+                return RequestToBeSentAction.continueWith(req);
+            }
+            @Override public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived resp) {
+                try {
+                    if (resp.toolSource().isFromTool(ToolType.PROXY)) {
+                        var req = resp.initiatingRequest();
+                        if (req != null) {
+                            boolean inScope = api.scope().isInScope(req.url());
+                            mainTab.liveTab().onProxyResponse(req, resp, inScope);
+                        }
+                    }
+                } catch (Exception ex) {
+                    logging.logToError("[BAC] Live handler error: " + ex.getMessage());
+                }
+                return ResponseReceivedAction.continueWith(resp);
+            }
+        });
 
         // --- 6. Hotkey: quick-save to Inbox (configurable in Settings) ---
         // Default is Ctrl+Alt+B (matches the DB default and the Settings hint).
@@ -180,6 +210,11 @@ public class Extension implements BurpExtension {
                 JMenuItem importSession = new JMenuItem("Create/Update account from this request's session");
                 importSession.addActionListener(e -> importSessionFromRequest(rr));
                 items.add(importSession);
+
+                // IDOR enumeration on this request
+                JMenuItem idor = new JMenuItem("Fuzz IDOR (enumerate identifier)…");
+                idor.addActionListener(e -> openIdorFuzz(rr));
+                items.add(idor);
             }
 
             return items;
@@ -217,6 +252,24 @@ public class Extension implements BurpExtension {
                     }
                 } catch (Exception e) {
                     api.logging().logToError("[BAC] Save dialog error: " + e.getMessage());
+                }
+            });
+        }
+
+        private void openIdorFuzz(HttpRequestResponse rr) {
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    var req = rr.request();
+                    byte[] requestRaw = req.toByteArray().getBytes();
+                    var svc = req.httpService();
+                    var service = burp.api.montoya.http.HttpService.httpService(
+                        svc.host(), svc.port(), svc.secure());
+                    var accounts = accountRepo.getAll();
+                    Frame parent = api.userInterface().swingUtils().suiteFrame();
+                    ui.IdorFuzzDialog dlg = new ui.IdorFuzzDialog(api, parent, requestRaw, service, accounts);
+                    dlg.setVisible(true);
+                } catch (Exception e) {
+                    api.logging().logToError("[BAC] IDOR fuzz dialog error: " + e.getMessage());
                 }
             });
         }

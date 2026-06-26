@@ -48,8 +48,28 @@ Functional implementation of Phases 1–7. Key packages:
 - `engine/` – `RunEngine` (canary check, identity swap, dynamic-field rewrite, send, similarity,
   verdict), `DiffUtil` (line-based side-by-side diff), `DynamicField` (CSRF/nonce locators).
 - `ui/` – `MainTab` host + `LibraryTab`, `AccountsTab`, `TestRunTab` (+ `OverviewMatrix`),
-  `CompareTab` (+ `DiffView`), `SettingsTab`, plus `SaveDialog`, `DynamicFieldsDialog`,
-  `ExportImportManager`.
+  `LiveTab`, `CompareTab` (+ `DiffView`), `DashboardTab`, `SettingsTab`, plus `SaveDialog`,
+  `DynamicFieldsDialog`, `IdorFuzzDialog`, `ExportImportManager`, and shared `CollapsibleSection`
+  / `VerdictStyle` helpers.
+
+Recent additions:
+
+- **Live mode (`LiveTab`)** – Autorize-style passive testing. An `HttpHandler` registered in
+  `Extension` routes in-scope **Proxy** responses to `LiveTab`, which replays each under a chosen
+  low-priv/anonymous identity via `RunEngine.replayOnce` and shows live verdicts + dual response
+  viewers. Replays go out as the Extensions tool, so they never loop back through the handler.
+- **Anonymous identity** – an account with no cookies and no headers is treated as unauthenticated;
+  identity swap strips the original cookie jar entirely instead of merging (forced-browsing tests).
+- **Reflected-identity detection** – `RunEngine.detectReflectedIdentity` flags when victim-specific
+  identifiers (emails / UUIDs / long ids / tokens) appear verbatim in the attacker response.
+- **IDOR enumeration (`IdorFuzzDialog`)** – context-menu "Fuzz IDOR" marks an identifier, enumerates
+  a value list or numeric range under any identity, and flags reachable ids. Self-contained on
+  `RunEngine`'s static helpers.
+- **Dashboard (`DashboardTab`)** – project-wide verdict tallies as clickable cards.
+- **Library Last-Verdict column** – latest (most severe) triage verdict per test case, color-coded.
+- **Compare polish** – intra-line **word-level** highlighting (only the changed characters) plus a
+  clickable change **minimap** in `DiffView`.
+- **Collapsible sections** – unified, fully-clickable `CollapsibleSection` shared across tabs.
 
 Notable behaviours:
 

@@ -222,6 +222,21 @@ public class DatabaseManager {
                     value TEXT
                 )
             """);
+
+            // AI auto-organization cache: maps a normalized endpoint signature
+            // (method + host + templated path) to a previously chosen folder +
+            // name + description so similar requests are grouped WITHOUT spending
+            // another API call. This is the main lever that keeps AI usage cheap.
+            st.execute("""
+                CREATE TABLE IF NOT EXISTS ai_endpoint_cache (
+                    signature   TEXT PRIMARY KEY,
+                    folder_id   INTEGER,
+                    folder_path TEXT,
+                    name        TEXT,
+                    description TEXT,
+                    created_at  INTEGER
+                )
+            """);
         }
     }
 
@@ -250,7 +265,15 @@ public class DatabaseManager {
                 {"auto_expand_folders", "true"},
                 {"confirm_before_run", "true"},
                 {"scope_enforcement", "WARN"},   // WARN / BLOCK / OFF
-                {"dedup_on_import",  "true"}
+                {"dedup_on_import",  "true"},
+                // ── AI auto-organization (Phase 8) ──────────────────────────
+                // Off by default; the user must opt in and supply an API key.
+                {"ai_enabled",        "false"},          // master switch
+                {"ai_auto_organize",  "true"},           // organize on capture when enabled
+                {"ai_provider",       "GEMINI"},         // GEMINI / GROQ / OPENROUTER
+                {"ai_api_key",        ""},               // provider API key (stored locally)
+                {"ai_model",          ""},               // blank = provider default
+                {"ai_max_chars",      "1800"}            // truncation budget per request+response (token control)
             };
             for (String[] kv : defaults) {
                 ps.setString(1, kv[0]);

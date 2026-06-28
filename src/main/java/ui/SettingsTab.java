@@ -51,6 +51,14 @@ public class SettingsTab extends JPanel {
     private DefaultListModel<String> patternModel;
     private JLabel dbPathLabel;
 
+    // AI organization
+    private JCheckBox aiEnabledCheck;
+    private JCheckBox aiAutoOrganizeCheck;
+    private JComboBox<String> aiProviderCombo;
+    private JPasswordField aiApiKeyField;
+    private JTextField aiModelField;
+    private JSpinner aiMaxCharsSpinner;
+
     // Fired after a successful save so the rest of the UI can react (e.g. recolor).
     private Runnable onSaved;
 
@@ -150,6 +158,61 @@ public class SettingsTab extends JPanel {
         hotkeyHint.setAlignmentX(Component.LEFT_ALIGNMENT);
         capture.addContent(hotkeyHint);
         form.add(capture);
+        form.add(gap(6));
+
+        // ── AI Organization ────────────────────────────────────────────────
+        CollapsibleSection ai = new CollapsibleSection("AI Organization", "✨");
+
+        for (String line : new String[]{
+                "When enabled, each captured request is read by an LLM that writes a short",
+                "name + description and files it into a function folder — grouping related",
+                "requests automatically. Keys are stored locally only; usage is kept low by",
+                "caching each endpoint (similar requests reuse the same folder with no call)."}) {
+            JLabel l = new JLabel(line);
+            l.setFont(l.getFont().deriveFont(Font.ITALIC, 11f));
+            l.setAlignmentX(Component.LEFT_ALIGNMENT);
+            ai.addContent(l);
+        }
+        ai.addContent(gap(6));
+
+        aiEnabledCheck = new JCheckBox("Enable AI auto-organization");
+        aiEnabledCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
+        ai.addContent(aiEnabledCheck);
+
+        aiAutoOrganizeCheck = new JCheckBox("Organize automatically when a request is captured "
+            + "(off = only via right-click ▸ Organize with AI)");
+        aiAutoOrganizeCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
+        ai.addContent(aiAutoOrganizeCheck);
+
+        aiProviderCombo = new JComboBox<>(new String[]{"GEMINI", "GROQ", "OPENROUTER"});
+        ai.addContent(row("Provider:", aiProviderCombo,
+            "GEMINI: Google Gemini · GROQ: Groq · OPENROUTER: OpenRouter (OpenAI-compatible)"));
+
+        aiApiKeyField = new JPasswordField(28);
+        ai.addContent(row("API key:", aiApiKeyField,
+            "Your provider API key. Stored locally in the SQLite settings table; never sent anywhere "
+            + "except the selected provider."));
+
+        aiModelField = new JTextField(24);
+        ai.addContent(row("Model (blank = default):", aiModelField,
+            "Leave blank to use a cheap default per provider (Gemini: gemini-2.0-flash, "
+            + "Groq: llama-3.1-8b-instant, OpenRouter: meta-llama/llama-3.1-8b-instruct)."));
+
+        aiMaxCharsSpinner = new JSpinner(new SpinnerNumberModel(1800, 400, 12000, 200));
+        aiMaxCharsSpinner.setPreferredSize(new Dimension(80, aiMaxCharsSpinner.getPreferredSize().height));
+        ai.addContent(row("Max request+response chars sent:", aiMaxCharsSpinner,
+            "Truncation budget per classification — lower means cheaper/faster, higher means "
+            + "more context. Default: 1800"));
+
+        JButton aiTestBtn = new JButton("Test connection");
+        aiTestBtn.addActionListener(e -> testAiConnection());
+        JPanel aiTestPan = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        aiTestPan.setAlignmentX(Component.LEFT_ALIGNMENT);
+        aiTestPan.add(aiTestBtn);
+        ai.addContent(gap(4));
+        ai.addContent(aiTestPan);
+
+        form.add(ai);
         form.add(gap(6));
 
         // ── Appearance ─────────────────────────────────────────────────────
@@ -327,6 +390,12 @@ public class SettingsTab extends JPanel {
                 String patterns    = db.getSetting("ignore_patterns");
                 String dbPath      = db.getSetting("db_path");
                 String hotkey      = db.getSetting("hotkey_combo");
+                String aiEnabled   = db.getSetting("ai_enabled");
+                String aiAuto      = db.getSetting("ai_auto_organize");
+                String aiProvider  = db.getSetting("ai_provider");
+                String aiApiKey    = db.getSetting("ai_api_key");
+                String aiModel     = db.getSetting("ai_model");
+                String aiMaxChars  = db.getSetting("ai_max_chars");
 
                 SwingUtilities.invokeLater(() -> {
                     setSpinner(thresholdSpinner, threshold);
@@ -354,6 +423,12 @@ public class SettingsTab extends JPanel {
                         } catch (Exception ignored) {}
                     }
                     hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Ctrl+Alt+B");
+                    aiEnabledCheck.setSelected("true".equalsIgnoreCase(aiEnabled));
+                    aiAutoOrganizeCheck.setSelected(!"false".equalsIgnoreCase(aiAuto));
+                    if (aiProvider != null) aiProviderCombo.setSelectedItem(aiProvider.trim().toUpperCase());
+                    if (aiApiKey != null) aiApiKeyField.setText(aiApiKey);
+                    if (aiModel != null) aiModelField.setText(aiModel);
+                    setSpinner(aiMaxCharsSpinner, aiMaxChars);
                     if (dbPath != null) dbPathLabel.setText(dbPath);
                     else dbPathLabel.setText(api.persistence().preferences().getString("bac_db_path"));
                 });
@@ -394,6 +469,12 @@ public class SettingsTab extends JPanel {
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
         String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Ctrl+Alt+B";
         final String hotkeyToSave = hotkeyRaw.isBlank() ? "Ctrl+Alt+B" : hotkeyRaw;
+        boolean aiEnabled  = aiEnabledCheck.isSelected();
+        boolean aiAuto     = aiAutoOrganizeCheck.isSelected();
+        String aiProvider  = (String) aiProviderCombo.getSelectedItem();
+        String aiApiKey    = new String(aiApiKeyField.getPassword()).trim();
+        String aiModel     = aiModelField.getText().trim();
+        int aiMaxChars     = (Integer) aiMaxCharsSpinner.getValue();
         List<String> patterns = new ArrayList<>();
         for (int i = 0; i < patternModel.size(); i++) patterns.add(patternModel.get(i));
         String patternsJson = gson.toJson(patterns);
@@ -419,6 +500,12 @@ public class SettingsTab extends JPanel {
                 db.setSetting("dedup_on_import", String.valueOf(dedup));
                 db.setSetting("hotkey_combo", hotkeyToSave);
                 db.setSetting("ignore_patterns", patternsJson);
+                db.setSetting("ai_enabled", String.valueOf(aiEnabled));
+                db.setSetting("ai_auto_organize", String.valueOf(aiAuto));
+                db.setSetting("ai_provider", aiProvider != null ? aiProvider : "GEMINI");
+                db.setSetting("ai_api_key", aiApiKey);
+                db.setSetting("ai_model", aiModel);
+                db.setSetting("ai_max_chars", String.valueOf(aiMaxChars));
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(this, "Settings saved.", "Saved", JOptionPane.INFORMATION_MESSAGE);
                     if (onSaved != null) onSaved.run();
@@ -429,6 +516,42 @@ public class SettingsTab extends JPanel {
                     JOptionPane.showMessageDialog(this, "Error saving: " + e.getMessage(),
                         "Error", JOptionPane.ERROR_MESSAGE));
             }
+        });
+    }
+
+    // ── AI test ───────────────────────────────────────────────────────────
+
+    /** Pings the provider with a tiny prompt using the CURRENT (unsaved) fields. */
+    private void testAiConnection() {
+        String provider = (String) aiProviderCombo.getSelectedItem();
+        String apiKey   = new String(aiApiKeyField.getPassword()).trim();
+        String model    = aiModelField.getText().trim();
+        if (apiKey.isBlank()) {
+            JOptionPane.showMessageDialog(this, "Enter an API key first.",
+                "AI Test", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        ai.AiConfig cfg = new ai.AiConfig(true, true,
+            provider != null ? provider : "GEMINI", apiKey, model, 800);
+        loader.submit(() -> {
+            String result;
+            boolean ok;
+            try {
+                String reply = new ai.AiClient(cfg).complete(
+                    "You are a connectivity check. Reply with a single JSON object.",
+                    "Reply with exactly: {\"ok\":true}");
+                ok = reply != null && reply.toLowerCase().contains("ok");
+                result = ok ? "Connection OK (model: " + cfg.effectiveModel() + ")."
+                            : "Reached provider but got an unexpected reply:\n" + reply;
+            } catch (Exception ex) {
+                ok = false;
+                result = "Failed: " + ex.getMessage();
+            }
+            final String msg = result;
+            final boolean success = ok;
+            SwingUtilities.invokeLater(() ->
+                JOptionPane.showMessageDialog(this, msg, "AI Test",
+                    success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE));
         });
     }
 

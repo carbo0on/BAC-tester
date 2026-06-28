@@ -212,7 +212,7 @@ public class TestRunTab extends JPanel {
         });
         top.add(stopBtn);
 
-        panel.add(top, BorderLayout.NORTH);
+        panel.add(new FoldablePanel(api, "testrun_config", "Run options", top), BorderLayout.NORTH);
 
         // Progress row
         JPanel progressRow = new JPanel(new BorderLayout(8, 0));

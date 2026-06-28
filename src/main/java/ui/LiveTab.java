@@ -111,7 +111,7 @@ public class LiveTab extends JPanel {
         controls.add(clear);
 
         JPanel north = new JPanel(new BorderLayout());
-        north.add(controls, BorderLayout.CENTER);
+        north.add(new FoldablePanel(api, "live_controls", "Live options", controls), BorderLayout.CENTER);
         statusLabel.setBorder(BorderFactory.createEmptyBorder(2, 4, 4, 4));
         statusLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
         north.add(statusLabel, BorderLayout.SOUTH);

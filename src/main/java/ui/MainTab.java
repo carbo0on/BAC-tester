@@ -20,6 +20,7 @@ import java.util.Map;
 public class MainTab {
 
     private final MontoyaApi api;
+    private JPanel root;
     private final JTabbedPane tabbedPane;
     private final LibraryTab libraryTab;
     private final AccountsTab accountsTab;
@@ -122,11 +123,100 @@ public class MainTab {
             }
         });
 
-        api.userInterface().applyThemeToComponent(tabbedPane);
+        root = new JPanel(new BorderLayout());
+        root.add(tabbedPane, BorderLayout.CENTER);
+        root.add(buildFooter(), BorderLayout.SOUTH);
+
+        api.userInterface().applyThemeToComponent(root);
+    }
+
+    private JComponent buildFooter() {
+        JPanel footer = new JPanel(new BorderLayout());
+        footer.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")),
+            BorderFactory.createEmptyBorder(2, 8, 2, 8)));
+
+        JLabel brand = new JLabel("BAC Time-Machine");
+        brand.setFont(brand.getFont().deriveFont(Font.PLAIN, 11f));
+        brand.setForeground(UIManager.getColor("Label.disabledForeground"));
+
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        right.setOpaque(false);
+
+        JToggleButton density = new JToggleButton("Compact");
+        density.setToolTipText("Toggle comfortable / compact row density across all tables");
+        boolean compact = Boolean.TRUE.equals(safeGetBool("bac_density_compact"));
+        density.setSelected(compact);
+        applyDensity(compact);
+        density.addActionListener(e -> {
+            boolean c = density.isSelected();
+            applyDensity(c);
+            try { api.persistence().preferences().setBoolean("bac_density_compact", c); } catch (Exception ignored) {}
+        });
+
+        JButton help = new JButton("⌨ Shortcuts");
+        help.setToolTipText("Keyboard shortcuts and workflow help");
+        help.addActionListener(e -> showHelp());
+
+        right.add(density);
+        right.add(help);
+
+        footer.add(brand, BorderLayout.WEST);
+        footer.add(right, BorderLayout.EAST);
+        return footer;
+    }
+
+    private Boolean safeGetBool(String key) {
+        try { return api.persistence().preferences().getBoolean(key); } catch (Exception e) { return null; }
+    }
+
+    /** Applies comfortable (24px) or compact (18px) row height to every table in the UI tree. */
+    private void applyDensity(boolean compact) {
+        int h = compact ? 18 : 24;
+        SwingUtilities.invokeLater(() -> applyRowHeight(tabbedPane, h));
+    }
+
+    private void applyRowHeight(Component c, int h) {
+        if (c instanceof JTable t) t.setRowHeight(h);
+        if (c instanceof Container ct) for (Component child : ct.getComponents()) applyRowHeight(child, h);
+    }
+
+    private void showHelp() {
+        String msg = """
+            BAC Time-Machine — quick reference
+
+            CAPTURE
+              • Ctrl+Alt+B (configurable) — quick-save the focused request to Inbox
+              • Right-click ▸ Send to BAC… — save with folder / name / notes
+              • Right-click ▸ Fuzz IDOR… — enumerate an identifier
+
+            COMPARE (responses side-by-side)
+              • ↑ / ↓     move between test cases in the working set
+              • ← / →     cycle the focused pane's response (baselines + sessions)
+              • Tab/click switch the focused pane
+              • ‹ diff ›  jump between changes; click the minimap to scroll
+
+            LIVE (passive auto-replay)
+              • Pick a low-priv / anonymous identity, tick Enable, then browse
+                the target as your high-priv user. In-scope traffic is replayed
+                and triaged automatically. 'Verify vs anonymous' cuts false positives.
+
+            FOLDING
+              • Click any 'options' header (▾/▸) to fold a control bar and give the
+                table / responses the whole screen. The state is remembered.
+            """;
+        JTextArea ta = new JTextArea(msg);
+        ta.setEditable(false);
+        ta.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        ta.setBackground(UIManager.getColor("Panel.background"));
+        JScrollPane sp = new JScrollPane(ta);
+        sp.setPreferredSize(new Dimension(560, 460));
+        api.userInterface().applyThemeToComponent(sp);
+        JOptionPane.showMessageDialog(root, sp, "BAC Time-Machine — Help", JOptionPane.PLAIN_MESSAGE);
     }
 
     public String caption()        { return "BAC Time-Machine"; }
-    public Component uiComponent() { return tabbedPane; }
+    public Component uiComponent() { return root; }
 
     /** The Live tab — Extension routes Proxy traffic here for auto-replay. */
     public LiveTab liveTab() { return liveTab; }

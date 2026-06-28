@@ -488,7 +488,9 @@ public class CompareTab extends JPanel {
         header.add(leftSel,  BorderLayout.WEST);
         header.add(sessionChipsPanel, BorderLayout.CENTER);
         header.add(rightSel, BorderLayout.EAST);
-        top.add(header, BorderLayout.CENTER);
+        // Fold the OLD/NEW selectors + session chips away to give the two
+        // responses the whole screen; the slim nav row above stays visible.
+        top.add(new FoldablePanel(api, "compare_selectors", "Compare options", header), BorderLayout.CENTER);
 
         api.userInterface().applyThemeToComponent(top);
         api.userInterface().applyThemeToComponent(nav);

@@ -48,6 +48,7 @@ public class LiveTab extends JPanel {
     private final JCheckBox enableCheck = new JCheckBox("Enable live testing");
     private final JCheckBox scopeOnly   = new JCheckBox("In-scope only", true);
     private final JCheckBox skipStatic  = new JCheckBox("Skip static assets", true);
+    private final JCheckBox verifyAnon  = new JCheckBox("Verify vs anonymous");
     private final JCheckBox flaggedOnly = new JCheckBox("Show flagged only");
     private final JLabel statusLabel = new JLabel("Disabled.");
 
@@ -100,8 +101,16 @@ public class LiveTab extends JPanel {
         controls.add(enableCheck);
         controls.add(scopeOnly);
         controls.add(skipStatic);
+        verifyAnon.setToolTipText("Also replay anonymously; if the result matches anonymous, "
+            + "the endpoint is public (not auth-gated) and won't be flagged as BAC");
+        controls.add(verifyAnon);
         flaggedOnly.addActionListener(e -> model.fireTableDataChanged());
         controls.add(flaggedOnly);
+
+        JButton sendBurp = new JButton("Send flagged → Burp");
+        sendBurp.setToolTipText("Add flagged findings to Burp's site map as audit issues (Dashboard)");
+        sendBurp.addActionListener(e -> sendFlaggedToBurp());
+        controls.add(sendBurp);
 
         JButton clear = new JButton("Clear");
         clear.addActionListener(e -> {
@@ -111,7 +120,7 @@ public class LiveTab extends JPanel {
         controls.add(clear);
 
         JPanel north = new JPanel(new BorderLayout());
-        north.add(controls, BorderLayout.CENTER);
+        north.add(new FoldablePanel(api, "live_controls", "Live options", controls), BorderLayout.CENTER);
         statusLabel.setBorder(BorderFactory.createEmptyBorder(2, 4, 4, 4));
         statusLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
         north.add(statusLabel, BorderLayout.SOUTH);
@@ -243,6 +252,21 @@ public class LiveTab extends JPanel {
                 f.leak = out.leaksIdentity();
                 f.origRespRaw = origRespRaw; f.newRespRaw = out.responseRaw();
                 f.reqRaw = reqRaw;
+                f.headerDiff = RunEngine.notableHeaderDiffs(origRespRaw, out.responseRaw());
+
+                // Three-leg check: if the result matches an anonymous replay, the
+                // endpoint is public, so demote any BAC flag to avoid false positives.
+                if (verifyAnon.isSelected() && out.status() != 0) {
+                    var anon = new AccountRepository.AccountRecord(
+                        -1, "anonymous", null, java.util.Map.of(), java.util.Map.of(),
+                        "DENIED", null, null, 0, 0);
+                    RunEngine.ReplayOutcome anonOut = engine.replayOnce(
+                        reqRaw, svc, anon, dyn, origBody, origStatus, "DENIED", threshold);
+                    if (RunEngine.isLikelyPublic(out.body(), anonOut.body(), threshold)) {
+                        f.publicContent = true;
+                        if (RunEngine.POTENTIAL_BAC.equals(f.verdict)) f.verdict = RunEngine.EXPECTED_OK;
+                    }
+                }
                 f.original = burp.api.montoya.http.message.HttpRequestResponse.httpRequestResponse(
                     HttpRequest.httpRequest(svc, ByteArray.byteArray(reqRaw)),
                     HttpResponse.httpResponse(ByteArray.byteArray(origRespRaw)));
@@ -261,6 +285,39 @@ public class LiveTab extends JPanel {
         if (findings.size() > 500) findings.remove(findings.size() - 1);
         model.fireTableDataChanged();
         updateStatus();
+    }
+
+    /** Pushes every flagged finding into Burp's site map as a triage audit issue. */
+    private void sendFlaggedToBurp() {
+        int added = 0;
+        for (Finding f : findings) {
+            if (!(isFlagged(f.verdict) || f.leak) || f.original == null) continue;
+            try {
+                String name = "[BAC] Possible broken access control — " + VerdictStyle.shortLabel(f.verdict);
+                String detail = "Replayed under a lower-privilege identity and the response was "
+                    + String.format("%.0f%%", f.similarity) + " similar to the owner's "
+                    + "(status " + f.origStatus + " → " + f.newStatus + ")."
+                    + (f.leak ? " Victim-specific identifiers were reflected in the response." : "")
+                    + (f.headerDiff != null && !f.headerDiff.isEmpty() ? " Header changes: " + f.headerDiff : "")
+                    + " Flagged by BAC Time-Machine for manual review.";
+                var sev = RunEngine.POTENTIAL_BAC.equals(f.verdict)
+                    ? burp.api.montoya.scanner.audit.issues.AuditIssueSeverity.HIGH
+                    : burp.api.montoya.scanner.audit.issues.AuditIssueSeverity.INFORMATION;
+                var issue = burp.api.montoya.scanner.audit.issues.AuditIssue.auditIssue(
+                    name, detail, "Confirm manually whether the lower-privilege identity should "
+                        + "have access to this resource.",
+                    f.https ? "https://" + f.host + f.path : "http://" + f.host + f.path,
+                    sev, burp.api.montoya.scanner.audit.issues.AuditIssueConfidence.TENTATIVE,
+                    "Detected by replaying captured traffic under a different identity.",
+                    null, sev, f.original);
+                api.siteMap().add(issue);
+                added++;
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Send-to-Burp failed: " + ex.getMessage());
+            }
+        }
+        JOptionPane.showMessageDialog(this, added + " finding(s) added to Burp's site map / Dashboard.",
+            "Send to Burp", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void updateStatus() {
@@ -332,12 +389,13 @@ public class LiveTab extends JPanel {
         String method, host, path; int port; boolean https;
         int origStatus, newStatus;
         double similarity; String verdict; boolean leak;
+        boolean publicContent; String headerDiff = "";
         byte[] origRespRaw, newRespRaw, reqRaw;
         burp.api.montoya.http.message.HttpRequestResponse original;
     }
 
     private final class FindingTableModel extends AbstractTableModel {
-        private final String[] cols = {"Time", "Verdict", "Method", "Host / Path", "Status", "Similarity", "Leak"};
+        private final String[] cols = {"Time", "Verdict", "Method", "Host / Path", "Status", "Similarity", "Leak", "Detail"};
         @Override public int getRowCount() { return visibleFindings().size(); }
         @Override public int getColumnCount() { return cols.length; }
         @Override public String getColumnName(int c) { return cols[c]; }
@@ -351,8 +409,18 @@ public class LiveTab extends JPanel {
                 case 4 -> f.origStatus + " → " + f.newStatus;
                 case 5 -> String.format("%.0f%%", f.similarity);
                 case 6 -> f.leak ? "⚠ yes" : "";
+                case 7 -> detail(f);
                 default -> "";
             };
+        }
+        private String detail(Finding f) {
+            StringBuilder sb = new StringBuilder();
+            if (f.publicContent) sb.append("public");
+            if (f.headerDiff != null && !f.headerDiff.isEmpty()) {
+                if (sb.length() > 0) sb.append(" · ");
+                sb.append(f.headerDiff);
+            }
+            return sb.toString();
         }
         private String timeStr(long ms) {
             return new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date(ms));

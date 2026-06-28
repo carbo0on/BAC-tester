@@ -65,7 +65,12 @@ public class RunEngine {
     private volatile int    runThreads = 1;            // concurrent in-flight requests (1–16)
     private volatile long   runDelayMs = 0;            // throttle: delay before each request
     private volatile boolean detectLoginBody = true;   // treat a 200 login page as expired session
+    private volatile int    canaryRecheckEvery = 0;    // re-validate session every N requests (0 = off)
     private volatile List<Pattern> ignorePatterns = new ArrayList<>();
+
+    /** Guards a single in-flight periodic canary recheck across worker threads. */
+    private final java.util.concurrent.atomic.AtomicInteger lastCanaryCheckAt =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     /** Matches a login form in a 200 response body (strong "session expired" signal). */
     private static final Pattern LOGIN_BODY =
@@ -137,12 +142,15 @@ public class RunEngine {
                     new java.util.concurrent.atomic.AtomicInteger();
                 int threads = Math.max(1, Math.min(runThreads, 16));
 
+                lastCanaryCheckAt.set(0);
                 if (threads == 1) {
                     for (long tcId : testCaseIds) {
                         if (cancelRequested) break;
                         throttle();
                         processOne(fRunId, tcId, account, safeMode, matchThreshold);
-                        fireProgress(done.incrementAndGet(), total);
+                        int d = done.incrementAndGet();
+                        fireProgress(d, total);
+                        maybeRecheckCanary(account, d);
                     }
                 } else {
                     pool = Executors.newFixedThreadPool(threads, workerFactory());
@@ -156,7 +164,9 @@ public class RunEngine {
                             } catch (Exception ex) {
                                 api.logging().logToError("[BAC] Run worker TC " + id + ": " + ex.getMessage());
                             } finally {
-                                fireProgress(done.incrementAndGet(), total);
+                                int d = done.incrementAndGet();
+                                fireProgress(d, total);
+                                maybeRecheckCanary(account, d);
                             }
                         });
                     }
@@ -223,6 +233,10 @@ public class RunEngine {
         try {
             String lb = dbManager.getSetting("canary_detect_login_body");
             if (lb != null) detectLoginBody = !"false".equalsIgnoreCase(lb.trim());
+        } catch (Exception ignored) {}
+        try {
+            String ce = dbManager.getSetting("canary_recheck_every");
+            if (ce != null && !ce.isBlank()) canaryRecheckEvery = Integer.parseInt(ce.trim());
         } catch (Exception ignored) {}
         ignorePatterns = loadIgnorePatterns(dbManager);
     }
@@ -300,6 +314,28 @@ public class RunEngine {
             } catch (Exception ignored) {}
         }
         return false;
+    }
+
+    /**
+     * Periodically re-validates the account's session mid-run so a session that
+     * expires partway through doesn't silently produce a wall of false negatives.
+     * When the recheck fails the run is cancelled (already-stored results stay).
+     * Guarded so only one worker performs the check per interval boundary.
+     */
+    private void maybeRecheckCanary(AccountRepository.AccountRecord account, int doneCount) {
+        int every = canaryRecheckEvery;
+        // Each doneCount value is produced by a single incrementAndGet, so exactly
+        // one worker observes any given multiple of `every` — no extra guard needed.
+        if (every <= 0 || doneCount <= 0 || doneCount % every != 0) return;
+        if (account.canaryRequestId() == null || cancelRequested) return;
+        lastCanaryCheckAt.set(doneCount);
+        if (!checkCanary(account)) {
+            cancelRequested = true;
+            api.logging().logToError("[BAC] Session expired mid-run (canary failed after "
+                + doneCount + " requests) — run cancelled to avoid false negatives.");
+        } else {
+            api.logging().logToOutput("[BAC] Canary re-check OK after " + doneCount + " requests.");
+        }
     }
 
     // ---- Single test case ----------------------------------------------
@@ -708,6 +744,73 @@ public class RunEngine {
     public record ReplayOutcome(int status, byte[] body, byte[] responseRaw,
                                 double similarity, String verdict, Set<String> leakedIdentifiers) {
         public boolean leaksIdentity() { return leakedIdentifiers != null && !leakedIdentifiers.isEmpty(); }
+    }
+
+    // ---- Header-diff signal --------------------------------------------
+
+    /** Access-control-relevant headers whose change between two responses is worth noting. */
+    private static final String[] NOTABLE_HEADERS =
+        {"Location", "Set-Cookie", "WWW-Authenticate", "Content-Type", "Content-Disposition"};
+
+    /**
+     * Summarizes notable header differences between two raw responses (old vs new),
+     * e.g. a new {@code Location} redirect or a fresh {@code Set-Cookie}. These often
+     * carry the real access-control signal even when bodies look alike. Returns a
+     * short human-readable string, or "" when nothing notable changed.
+     */
+    public static String notableHeaderDiffs(byte[] oldRaw, byte[] newRaw) {
+        Map<String, String> a = parseHeaders(oldRaw);
+        Map<String, String> b = parseHeaders(newRaw);
+        StringBuilder sb = new StringBuilder();
+        for (String h : NOTABLE_HEADERS) {
+            String va = a.get(h.toLowerCase());
+            String vb = b.get(h.toLowerCase());
+            if (!Objects.equals(va, vb)) {
+                if (sb.length() > 0) sb.append("; ");
+                if (va == null)      sb.append("+").append(h).append(": ").append(trim(vb));
+                else if (vb == null) sb.append("-").append(h);
+                else                 sb.append(h).append(": ").append(trim(va)).append(" → ").append(trim(vb));
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String trim(String s) {
+        if (s == null) return "";
+        s = s.trim();
+        return s.length() > 60 ? s.substring(0, 60) + "…" : s;
+    }
+
+    /** Parses response headers (lower-cased names → value) from raw bytes, first occurrence wins. */
+    private static Map<String, String> parseHeaders(byte[] raw) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (raw == null || raw.length == 0) return out;
+        String text = new String(raw, StandardCharsets.ISO_8859_1);
+        int end = text.indexOf("\r\n\r\n");
+        if (end < 0) end = text.indexOf("\n\n");
+        if (end >= 0) text = text.substring(0, end);
+        String[] lines = text.split("\r\n|\n");
+        for (int i = 1; i < lines.length; i++) { // skip status line
+            int colon = lines[i].indexOf(':');
+            if (colon > 0) {
+                String name = lines[i].substring(0, colon).trim().toLowerCase();
+                String val  = lines[i].substring(colon + 1).trim();
+                out.putIfAbsent(name, val);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Heuristic for the three-leg test: if the low-priv response is essentially
+     * identical to the anonymous response, the endpoint is serving public content
+     * (not actually auth-gated), so a "match" against the owner baseline is NOT
+     * evidence of broken access control — it would otherwise be a false positive.
+     */
+    public static boolean isLikelyPublic(byte[] lowPrivBody, byte[] anonymousBody, double threshold) {
+        if (lowPrivBody == null || anonymousBody == null) return false;
+        if (lowPrivBody.length == 0 || anonymousBody.length == 0) return false;
+        return computeSimilarity(lowPrivBody, anonymousBody, null) >= threshold;
     }
 
     // ---- Verdict -------------------------------------------------------

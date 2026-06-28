@@ -59,10 +59,17 @@ public class OverviewMatrix extends JPanel {
 
         JButton refreshBtn = new JButton("↻ Refresh");
         refreshBtn.addActionListener(e -> refresh());
+        JButton csvBtn = new JButton("⤓ CSV");
+        csvBtn.setToolTipText("Export the matrix (request × session verdicts) to CSV");
+        csvBtn.addActionListener(e -> exportCsv());
+
+        JPanel topRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        topRight.add(csvBtn);
+        topRight.add(refreshBtn);
 
         JPanel top = new JPanel(new BorderLayout());
         top.add(statusLabel, BorderLayout.CENTER);
-        top.add(refreshBtn, BorderLayout.EAST);
+        top.add(topRight, BorderLayout.EAST);
         add(top, BorderLayout.NORTH);
 
         tableModel = new MatrixTableModel();
@@ -169,6 +176,52 @@ public class OverviewMatrix extends JPanel {
         RunRepository.MatrixCell cell = tableModel.getCellData(row, col);
         if (cell == null) return;
         if (onOpenInCompare != null) onOpenInCompare.accept(cell.testCaseId());
+    }
+
+    // ---- CSV export ----------------------------------------------------
+
+    private void exportCsv() {
+        int rows = tableModel.getRowCount(), cols = tableModel.getColumnCount();
+        if (rows == 0) {
+            JOptionPane.showMessageDialog(this, "Nothing to export — run some tests first.",
+                "Export CSV", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        javax.swing.JFileChooser chooser = new javax.swing.JFileChooser();
+        chooser.setSelectedFile(new java.io.File("bac-matrix.csv"));
+        if (chooser.showSaveDialog(this) != javax.swing.JFileChooser.APPROVE_OPTION) return;
+        java.io.File f = chooser.getSelectedFile();
+
+        StringBuilder sb = new StringBuilder();
+        for (int c = 0; c < cols; c++) {
+            if (c > 0) sb.append(',');
+            sb.append(csv(tableModel.getColumnName(c)));
+        }
+        sb.append('\n');
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                if (c > 0) sb.append(',');
+                Object v = tableModel.getValueAt(r, c);
+                sb.append(csv(v == null ? "" : v.toString()));
+            }
+            sb.append('\n');
+        }
+        try {
+            java.nio.file.Files.write(f.toPath(), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            JOptionPane.showMessageDialog(this, "Matrix saved:\n" + f.getAbsolutePath(),
+                "Export CSV", JOptionPane.INFORMATION_MESSAGE);
+        } catch (Exception ex) {
+            api.logging().logToError("[BAC] CSV export failed: " + ex.getMessage());
+            JOptionPane.showMessageDialog(this, "Export failed: " + ex.getMessage(),
+                "Export CSV", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private static String csv(String s) {
+        if (s == null) return "";
+        boolean q = s.contains(",") || s.contains("\"") || s.contains("\n");
+        String e = s.replace("\"", "\"\"");
+        return q ? "\"" + e + "\"" : e;
     }
 
     // ---- Table model --------------------------------------------------

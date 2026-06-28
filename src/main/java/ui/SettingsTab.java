@@ -36,6 +36,7 @@ public class SettingsTab extends JPanel {
     private JComboBox<String> safeModeScopeCombo;
     private JSpinner runThreadsSpinner;
     private JSpinner runDelaySpinner;
+    private JSpinner canaryRecheckSpinner;
     private JCheckBox warnCanaryCheck;
     private JCheckBox detectLoginCheck;
     private JSpinner fontSizeSpinner;
@@ -127,6 +128,12 @@ public class SettingsTab extends JPanel {
         runDelaySpinner.setPreferredSize(new Dimension(80, runDelaySpinner.getPreferredSize().height));
         runSafety.addContent(row("Throttle delay (ms):", runDelaySpinner,
             "Delay applied before each request during a run (0 = none). Use to avoid rate limits."));
+
+        canaryRecheckSpinner = new JSpinner(new SpinnerNumberModel(0, 0, 1000, 5));
+        canaryRecheckSpinner.setPreferredSize(new Dimension(70, canaryRecheckSpinner.getPreferredSize().height));
+        runSafety.addContent(row("Re-check canary every N requests:", canaryRecheckSpinner,
+            "Re-validate the session mid-run every N requests so an expiry doesn't cause false "
+            + "negatives (0 = only at the start). Needs a canary set on the account."));
         form.add(runSafety);
         form.add(gap(6));
 
@@ -314,6 +321,7 @@ public class SettingsTab extends JPanel {
                 String dedup       = db.getSetting("dedup_on_import");
                 String runThreads  = db.getSetting("run_threads");
                 String runDelay    = db.getSetting("run_delay_ms");
+                String canaryEvery = db.getSetting("canary_recheck_every");
                 String warnCanary  = db.getSetting("warn_missing_canary");
                 String detectLogin = db.getSetting("canary_detect_login_body");
                 String patterns    = db.getSetting("ignore_patterns");
@@ -333,6 +341,7 @@ public class SettingsTab extends JPanel {
                     detectLoginCheck.setSelected(!"false".equalsIgnoreCase(detectLogin));
                     setSpinner(runThreadsSpinner, runThreads);
                     setSpinner(runDelaySpinner, runDelay);
+                    setSpinner(canaryRecheckSpinner, canaryEvery);
                     dedupCheckSetSelected(dedup);
                     if (coloring != null) coloringCombo.setSelectedItem(coloring);
                     if (scope != null) scopeCombo.setSelectedItem(scope);
@@ -381,6 +390,7 @@ public class SettingsTab extends JPanel {
         boolean detectLogin = detectLoginCheck.isSelected();
         int runThreads     = (Integer) runThreadsSpinner.getValue();
         int runDelay       = (Integer) runDelaySpinner.getValue();
+        int canaryEvery    = (Integer) canaryRecheckSpinner.getValue();
         boolean dedup      = dedupCheck != null && dedupCheck.isSelected();
         String hotkeyRaw   = hotkeyField != null ? hotkeyField.getText().trim() : "Ctrl+Alt+B";
         final String hotkeyToSave = hotkeyRaw.isBlank() ? "Ctrl+Alt+B" : hotkeyRaw;
@@ -405,6 +415,7 @@ public class SettingsTab extends JPanel {
                 db.setSetting("canary_detect_login_body", String.valueOf(detectLogin));
                 db.setSetting("run_threads", String.valueOf(runThreads));
                 db.setSetting("run_delay_ms", String.valueOf(runDelay));
+                db.setSetting("canary_recheck_every", String.valueOf(canaryEvery));
                 db.setSetting("dedup_on_import", String.valueOf(dedup));
                 db.setSetting("hotkey_combo", hotkeyToSave);
                 db.setSetting("ignore_patterns", patternsJson);

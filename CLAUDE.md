@@ -70,6 +70,18 @@ Recent additions:
 - **Compare polish** – intra-line **word-level** highlighting (only the changed characters) plus a
   clickable change **minimap** in `DiffView`.
 - **Collapsible sections** – unified, fully-clickable `CollapsibleSection` shared across tabs.
+- **Foldable option bars (`FoldablePanel`)** – the control/option bar in Test Run, Live and Compare
+  folds away to give the table/responses the whole screen; fold state persisted via Burp preferences.
+- **3-leg / false-positive cut** – `RunEngine.isLikelyPublic` + Live "Verify vs anonymous": if the
+  low-priv response matches an anonymous replay, the endpoint is public and is not flagged as BAC.
+- **Header-diff signal** – `RunEngine.notableHeaderDiffs` surfaces Location / Set-Cookie /
+  WWW-Authenticate / Content-Type changes (shown in Live's Detail column).
+- **Mid-run canary recheck** – Settings "Re-check canary every N requests" re-validates the session
+  during a run and aborts on expiry (avoids a wall of false negatives).
+- **Exports** – Live "Send flagged → Burp" adds audit issues to the site map; Overview Matrix CSV
+  export; HTML findings report (`ReportExporter`).
+- **Footer** – global shortcuts/workflow help dialog + comfortable/compact density toggle (persisted,
+  applied to all tables).
 
 Notable behaviours:
 

@@ -107,6 +107,11 @@ public class LiveTab extends JPanel {
         flaggedOnly.addActionListener(e -> model.fireTableDataChanged());
         controls.add(flaggedOnly);
 
+        JButton sendBurp = new JButton("Send flagged → Burp");
+        sendBurp.setToolTipText("Add flagged findings to Burp's site map as audit issues (Dashboard)");
+        sendBurp.addActionListener(e -> sendFlaggedToBurp());
+        controls.add(sendBurp);
+
         JButton clear = new JButton("Clear");
         clear.addActionListener(e -> {
             findings.clear(); seen.clear(); processed = 0; flaggedCount = 0;
@@ -280,6 +285,39 @@ public class LiveTab extends JPanel {
         if (findings.size() > 500) findings.remove(findings.size() - 1);
         model.fireTableDataChanged();
         updateStatus();
+    }
+
+    /** Pushes every flagged finding into Burp's site map as a triage audit issue. */
+    private void sendFlaggedToBurp() {
+        int added = 0;
+        for (Finding f : findings) {
+            if (!(isFlagged(f.verdict) || f.leak) || f.original == null) continue;
+            try {
+                String name = "[BAC] Possible broken access control — " + VerdictStyle.shortLabel(f.verdict);
+                String detail = "Replayed under a lower-privilege identity and the response was "
+                    + String.format("%.0f%%", f.similarity) + " similar to the owner's "
+                    + "(status " + f.origStatus + " → " + f.newStatus + ")."
+                    + (f.leak ? " Victim-specific identifiers were reflected in the response." : "")
+                    + (f.headerDiff != null && !f.headerDiff.isEmpty() ? " Header changes: " + f.headerDiff : "")
+                    + " Flagged by BAC Time-Machine for manual review.";
+                var sev = RunEngine.POTENTIAL_BAC.equals(f.verdict)
+                    ? burp.api.montoya.scanner.audit.issues.AuditIssueSeverity.HIGH
+                    : burp.api.montoya.scanner.audit.issues.AuditIssueSeverity.INFORMATION;
+                var issue = burp.api.montoya.scanner.audit.issues.AuditIssue.auditIssue(
+                    name, detail, "Confirm manually whether the lower-privilege identity should "
+                        + "have access to this resource.",
+                    f.https ? "https://" + f.host + f.path : "http://" + f.host + f.path,
+                    sev, burp.api.montoya.scanner.audit.issues.AuditIssueConfidence.TENTATIVE,
+                    "Detected by replaying captured traffic under a different identity.",
+                    null, sev, f.original);
+                api.siteMap().add(issue);
+                added++;
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Send-to-Burp failed: " + ex.getMessage());
+            }
+        }
+        JOptionPane.showMessageDialog(this, added + " finding(s) added to Burp's site map / Dashboard.",
+            "Send to Burp", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void updateStatus() {

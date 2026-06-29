@@ -36,6 +36,9 @@ public class AiOrganizer {
     private final AiCacheRepository cacheRepo;
     private final Runnable onChanged;
 
+    /** Optional sink for short, user-visible status lines (set by the UI). */
+    private volatile Consumer<String> onStatus;
+
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "bac-ai-organizer");
         t.setDaemon(true);
@@ -63,6 +66,16 @@ public class AiOrganizer {
         return AiConfig.load(db).isConfigured();
     }
 
+    /** Registers a sink for short status lines (e.g. the Library status bar). */
+    public void setStatusListener(Consumer<String> listener) {
+        this.onStatus = listener;
+    }
+
+    private void status(String msg) {
+        Consumer<String> l = onStatus;
+        if (l != null) l.accept(msg);
+    }
+
     // ---- Entry points ----------------------------------------------------
 
     /**
@@ -80,7 +93,9 @@ public class AiOrganizer {
                 organizeOne(cfg, row, false);
                 if (onChanged != null) onChanged.run();
             } catch (Exception e) {
-                api.logging().logToError("[BAC][AI] Auto-organize failed for #" + tcId + ": " + e.getMessage());
+                String m = e.getMessage();
+                api.logging().logToError("[BAC][AI] Auto-organize failed for #" + tcId + ": " + m);
+                status("AI ✗ organize failed: " + (m != null ? m : e.getClass().getSimpleName()));
             }
         });
     }
@@ -97,6 +112,7 @@ public class AiOrganizer {
         }
         worker.submit(() -> {
             int ok = 0, fail = 0;
+            String lastError = null;
             for (long id : ids) {
                 try {
                     TestCaseRow row = tcRepo.getById(id).orElse(null);
@@ -106,12 +122,15 @@ public class AiOrganizer {
                     if (onChanged != null) onChanged.run();
                 } catch (Exception e) {
                     fail++;
-                    api.logging().logToError("[BAC][AI] Organize #" + id + ": " + e.getMessage());
+                    lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    api.logging().logToError("[BAC][AI] Organize #" + id + ": " + lastError);
                 }
             }
             if (onDone != null) {
-                onDone.accept("AI organized " + ok + " request(s)"
-                        + (fail > 0 ? ", " + fail + " failed (see Extensions log)." : "."));
+                String summary = "AI organized " + ok + " request(s)";
+                if (fail > 0) summary += ", " + fail + " failed — " + lastError;
+                else summary += ".";
+                onDone.accept(summary);
             }
         });
     }
@@ -128,6 +147,7 @@ public class AiOrganizer {
             apply(row.id(), hit.name(), hit.description(), folderId);
             api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
                     + hit.folderPath() + " (cached, no API call).");
+            status("AI ✓ grouped → " + hit.folderPath() + " (cached)");
             return;
         }
 
@@ -178,6 +198,7 @@ public class AiOrganizer {
         cacheRepo.put(signature, folderId, folderPath, name, desc);
         api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
                 + " as \"" + name + "\".");
+        status("AI ✓ " + name + " → " + folderPath);
     }
 
     private void apply(long tcId, String name, String description, Long folderId) throws Exception {

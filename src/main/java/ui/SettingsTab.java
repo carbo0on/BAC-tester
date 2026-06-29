@@ -531,8 +531,10 @@ public class SettingsTab extends JPanel {
                 "AI Test", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        ai.AiConfig cfg = new ai.AiConfig(true, true,
-            provider != null ? provider : "GEMINI", apiKey, model, 800);
+        final String fProvider = provider != null ? provider : "GEMINI";
+        final String fModel = model;
+        final int maxChars = (Integer) aiMaxCharsSpinner.getValue();
+        ai.AiConfig cfg = new ai.AiConfig(true, true, fProvider, apiKey, model, 800);
         loader.submit(() -> {
             String result;
             boolean ok;
@@ -541,17 +543,41 @@ public class SettingsTab extends JPanel {
                     "You are a connectivity check. Reply with a single JSON object.",
                     "Reply with exactly: {\"ok\":true}");
                 ok = reply != null && reply.toLowerCase().contains("ok");
-                result = ok ? "Connection OK (model: " + cfg.effectiveModel() + ")."
+                result = ok ? "Connection OK (model: " + cfg.effectiveModel() + ").\n\n"
+                            + "AI organization has been enabled and these settings saved,\n"
+                            + "so it's active now — no need to also click 'Save Settings'."
                             : "Reached provider but got an unexpected reply:\n" + reply;
             } catch (Exception ex) {
                 ok = false;
                 result = "Failed: " + ex.getMessage();
             }
+            // On success, PERSIST + ENABLE so a working connection is immediately
+            // active. The previous behaviour tested the live fields without saving,
+            // so the organizer (which reads the DB) still saw "no key".
+            if (ok) {
+                try {
+                    db.setSetting("ai_enabled", "true");
+                    db.setSetting("ai_provider", fProvider);
+                    db.setSetting("ai_api_key", apiKey);
+                    db.setSetting("ai_model", fModel);
+                    db.setSetting("ai_max_chars", String.valueOf(maxChars));
+                    if (db.getSetting("ai_auto_organize") == null) {
+                        db.setSetting("ai_auto_organize", "true");
+                    }
+                } catch (Exception ex) {
+                    api.logging().logToError("[BAC] Persist AI settings after test failed: " + ex.getMessage());
+                }
+            }
             final String msg = result;
             final boolean success = ok;
-            SwingUtilities.invokeLater(() ->
+            SwingUtilities.invokeLater(() -> {
+                if (success) {
+                    aiEnabledCheck.setSelected(true);
+                    if (onSaved != null) onSaved.run();
+                }
                 JOptionPane.showMessageDialog(this, msg, "AI Test",
-                    success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE));
+                    success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE);
+            });
         });
     }
 

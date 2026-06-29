@@ -30,6 +30,44 @@ public class FolderRepository {
         }
     }
 
+    /**
+     * Resolves a "/"-separated folder path (e.g. "Authentication/Login") to a
+     * leaf folder id, creating any missing folders along the way. Empty or null
+     * paths return {@code null} (Inbox). Used by the AI auto-organizer so it can
+     * place a request into a nested function folder in one call.
+     */
+    public Long findOrCreatePath(String path) throws SQLException {
+        if (path == null) return null;
+        List<String> segments = new ArrayList<>();
+        for (String seg : path.split("/")) {
+            String s = seg.trim();
+            if (!s.isEmpty()) segments.add(s);
+        }
+        if (segments.isEmpty()) return null;
+
+        synchronized (db) {
+            List<FolderRecord> all = getAllFolders();
+            Long parentId = null;
+            for (String name : segments) {
+                Long match = null;
+                for (FolderRecord fr : all) {
+                    if (Objects.equals(fr.parentId(), parentId) && name.equalsIgnoreCase(fr.name())) {
+                        match = fr.id();
+                        break;
+                    }
+                }
+                if (match == null) {
+                    long created = createFolder(name, parentId);
+                    // Keep the in-memory snapshot consistent for the next segment.
+                    all.add(new FolderRecord(created, name, parentId, 0, null));
+                    match = created;
+                }
+                parentId = match;
+            }
+            return parentId;
+        }
+    }
+
     public List<FolderRecord> getAllFolders() throws SQLException {
         synchronized (db) {
             String sql = "SELECT id, name, parent_id, sort_order, color FROM folders ORDER BY sort_order, name";

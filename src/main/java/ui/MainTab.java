@@ -1,8 +1,10 @@
 package ui;
 
+import ai.AiOrganizer;
 import burp.api.montoya.MontoyaApi;
 import capture.CaptureService;
 import db.AccountRepository;
+import db.AiCacheRepository;
 import db.DatabaseManager;
 import db.FolderRepository;
 import db.RunRepository;
@@ -48,6 +50,16 @@ public class MainTab {
         RunEngine          runEngine  = new RunEngine(api, db);
 
         libraryTab  = new LibraryTab(api, folderRepo, tcRepo, captureService, db);
+
+        // AI auto-organizer: reads captured request/response and files it into a
+        // function folder. Wired here so both capture (auto) and the Library
+        // context menu (manual) can drive it. No-op until enabled in Settings.
+        AiCacheRepository aiCache = new AiCacheRepository(db);
+        AiOrganizer aiOrganizer = new AiOrganizer(api, db, tcRepo, folderRepo, aiCache,
+            () -> SwingUtilities.invokeLater(libraryTab::refresh));
+        captureService.setAiOrganizer(aiOrganizer);
+        libraryTab.setAiOrganizer(aiOrganizer);
+
         accountsTab = new AccountsTab(api, accountRepo, tcRepo);
         testRunTab  = new TestRunTab(api, runEngine, accountRepo, tcRepo, folderRepo, db);
         liveTab     = new LiveTab(api, runEngine, accountRepo, captureService, db);

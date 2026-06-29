@@ -1,5 +1,6 @@
 package capture;
 
+import ai.AiOrganizer;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import db.TestCaseRepository;
@@ -29,6 +30,9 @@ public class CaptureService {
 
     private final List<Runnable> onSaveListeners = new ArrayList<>();
 
+    /** Optional AI auto-organizer; wired post-construction (may stay null). */
+    private volatile AiOrganizer aiOrganizer;
+
     public CaptureService(MontoyaApi api, TestCaseRepository tcRepo) {
         this.api = api;
         this.tcRepo = tcRepo;
@@ -36,6 +40,11 @@ public class CaptureService {
 
     public void addOnSaveListener(Runnable listener) {
         onSaveListeners.add(listener);
+    }
+
+    /** Wires the AI organizer so quick-saved captures can be auto-filed. */
+    public void setAiOrganizer(AiOrganizer organizer) {
+        this.aiOrganizer = organizer;
     }
 
     /** Quick-save a single request to Inbox with no metadata dialog. */
@@ -73,6 +82,9 @@ public class CaptureService {
                 api.logging().logToOutput(
                     "[BAC] Saved: " + req.method() + " " + req.url() + " → id=" + id);
                 notifyListeners();
+                // Fire-and-forget AI auto-organization (no-op unless enabled).
+                AiOrganizer org = aiOrganizer;
+                if (org != null && id > 0) org.organizeOnCapture(id);
             } catch (Exception e) {
                 api.logging().logToError("[BAC] Save failed: " + e.getMessage());
             }

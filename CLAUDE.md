@@ -40,11 +40,16 @@ See @BAC-Tester-Burp-Extension-Spec.md for the full feature specification, archi
 
 ## Current State
 
-Functional implementation of Phases 1–7. Key packages:
+Functional implementation of Phases 1–7 plus an AI auto-organization layer. Key packages:
 
-- `capture/` – `CaptureService`: quick-save / save-with-metadata from context menu & hotkey.
+- `capture/` – `CaptureService`: quick-save / save-with-metadata from context menu & hotkey
+  (fires the optional `AiOrganizer` after each save).
 - `db/` – `DatabaseManager` (SQLite schema + migrations) and repositories (`TestCaseRepository`,
-  `AccountRepository`, `RunRepository`, `FolderRepository`).
+  `AccountRepository`, `RunRepository`, `FolderRepository`, `AiCacheRepository`).
+- `ai/` – `AiConfig` (settings snapshot), `AiClient` (multi-provider chat: Gemini native +
+  OpenAI-compatible Groq/OpenRouter, via the JDK HttpClient so calls bypass Burp), and
+  `AiOrganizer` (classifies a captured request/response → concise name + description + nested
+  function folder; groups similar endpoints via a signature cache to keep API usage low).
 - `engine/` – `RunEngine` (canary check, identity swap, dynamic-field rewrite, send, similarity,
   verdict), `DiffUtil` (line-based side-by-side diff), `DynamicField` (CSRF/nonce locators).
 - `ui/` – `MainTab` host + `LibraryTab`, `AccountsTab`, `TestRunTab` (+ `OverviewMatrix`),
@@ -82,6 +87,15 @@ Recent additions:
   export; HTML findings report (`ReportExporter`).
 - **Footer** – global shortcuts/workflow help dialog + comfortable/compact density toggle (persisted,
   applied to all tables).
+- **AI auto-organization (`ai/`)** – opt-in. On capture (or via Library right-click ▸ *Organize with
+  AI*), the request+response is sent to a chosen LLM (Gemini / Groq / OpenRouter) which returns a
+  concise name, a one-line description (stored as notes), and a nested *function* folder; the request
+  is renamed and filed there. Auto-organization only touches Inbox items so explicit "Send to BAC…"
+  folder choices are respected. Consumption is kept low by: off-by-default, an **endpoint-signature
+  cache** (`ai_endpoint_cache`) so similar requests reuse a prior decision with **zero** API calls, a
+  truncation budget (`ai_max_chars`), and passing the existing folder list to the model so it reuses
+  folders. Keys live only in the local SQLite settings; calls go out via the JDK HttpClient (not Burp).
+  Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection).
 
 Notable behaviours:
 

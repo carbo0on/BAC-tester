@@ -56,6 +56,7 @@ public class LibraryTab extends JPanel {
     private final CaptureService captureService;
     private final DatabaseManager db;
     private AccountRepository accountRepo;
+    private ai.AiOrganizer aiOrganizer;
 
     private volatile String coloringMode   = "AUTO";
     private volatile boolean autoExpandFolders = true;
@@ -109,6 +110,10 @@ public class LibraryTab extends JPanel {
     public void setAccountRepository(AccountRepository repo) {
         this.accountRepo = repo;
         refreshSessionCombo();
+    }
+
+    public void setAiOrganizer(ai.AiOrganizer organizer) {
+        this.aiOrganizer = organizer;
     }
 
     public LibraryTab(MontoyaApi api, FolderRepository folderRepo,
@@ -828,6 +833,7 @@ public class LibraryTab extends JPanel {
         JMenuItem deleteItem     = new JMenuItem("Delete");
         JMenuItem viewItem       = new JMenuItem("View Request / Response");
         JMenuItem compareItem    = new JMenuItem("Open in Compare");
+        JMenuItem aiOrganizeItem = new JMenuItem("Organize with AI ✨");
         JMenuItem runPairItem    = new JMenuItem("Run pair (A vs B) → Compare…");
         JMenuItem dynFieldsItem  = new JMenuItem("Edit Dynamic Fields (CSRF/nonce)…");
         JMenuItem rebaselineItem = new JMenuItem("Re-baseline (resend as owner)");
@@ -845,7 +851,7 @@ public class LibraryTab extends JPanel {
 
         popup.add(renameItem); popup.add(notesItem); popup.add(colorMenu); popup.add(moveItem);
         popup.addSeparator();
-        popup.add(viewItem); popup.add(compareItem); popup.add(runPairItem);
+        popup.add(viewItem); popup.add(compareItem); popup.add(aiOrganizeItem); popup.add(runPairItem);
         popup.addSeparator();
         popup.add(dynFieldsItem);
         popup.add(rebaselineItem);
@@ -902,6 +908,26 @@ public class LibraryTab extends JPanel {
             int row = table.getSelectedRow();
             if (row < 0 || onOpenInCompare == null) return;
             onOpenInCompare.accept(tableModel.getRow(row).id());
+        });
+
+        aiOrganizeItem.addActionListener(e -> {
+            int[] rows = table.getSelectedRows();
+            if (rows.length == 0) return;
+            if (aiOrganizer == null || !aiOrganizer.isReady()) {
+                JOptionPane.showMessageDialog(this,
+                    "AI organization is off or has no API key.\n"
+                    + "Enable it and set a provider key in the Settings tab (AI Organization).",
+                    "AI not configured", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            List<Long> tcIds = new ArrayList<>();
+            for (int r : rows) tcIds.add(tableModel.getRow(r).id());
+            statusLabel.setText("  Organizing " + tcIds.size() + " request(s) with AI…");
+            aiOrganizer.organizeSelection(tcIds, msg ->
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("  " + msg);
+                    refresh();
+                }));
         });
 
         runPairItem.addActionListener(e -> {

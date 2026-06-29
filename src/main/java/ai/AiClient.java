@@ -24,8 +24,12 @@ public class AiClient {
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
+    // Honor any system/JVM proxy (ProxySelector.getDefault()) so the call works
+    // both on a direct connection and behind a configured system proxy. This
+    // does NOT route through Burp — it reads the JVM's own proxy settings.
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
+            .proxy(java.net.ProxySelector.getDefault())
             .build();
 
     private final AiConfig config;

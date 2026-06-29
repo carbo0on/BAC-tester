@@ -114,6 +114,12 @@ public class LibraryTab extends JPanel {
 
     public void setAiOrganizer(ai.AiOrganizer organizer) {
         this.aiOrganizer = organizer;
+        if (organizer != null) {
+            // Surface AI activity (success / grouping / errors) in the status bar
+            // so auto-organization is observable instead of silent.
+            organizer.setStatusListener(msg ->
+                SwingUtilities.invokeLater(() -> statusLabel.setText("  " + msg)));
+        }
     }
 
     public LibraryTab(MontoyaApi api, FolderRepository folderRepo,
@@ -927,6 +933,11 @@ public class LibraryTab extends JPanel {
                 SwingUtilities.invokeLater(() -> {
                     statusLabel.setText("  " + msg);
                     refresh();
+                    // Make failures impossible to miss for a user-initiated action.
+                    if (msg != null && (msg.contains("failed") || msg.contains("not configured"))) {
+                        JOptionPane.showMessageDialog(this, msg,
+                            "Organize with AI", JOptionPane.WARNING_MESSAGE);
+                    }
                 }));
         });
 

@@ -921,8 +921,10 @@ public class LibraryTab extends JPanel {
             if (rows.length == 0) return;
             if (aiOrganizer == null || !aiOrganizer.isReady()) {
                 JOptionPane.showMessageDialog(this,
-                    "AI organization is off or has no API key.\n"
-                    + "Enable it and set a provider key in the Settings tab (AI Organization).",
+                    "AI is not active yet.\n\n"
+                    + "Go to Settings ▸ AI Organization, tick \"Enable\", choose a provider,\n"
+                    + "paste your API key, then click \"Test connection\" (a successful test\n"
+                    + "saves and activates it) — or click \"Save Settings\".",
                     "AI not configured", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }

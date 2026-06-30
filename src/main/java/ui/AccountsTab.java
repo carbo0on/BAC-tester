@@ -435,6 +435,8 @@ public class AccountsTab extends JPanel {
                     SwingUtilities.invokeLater(() -> { clearEditor(); loadAccounts(); });
                 } catch (Exception ex) {
                     api.logging().logToError("[BAC] Delete account failed: " + ex.getMessage());
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(AccountsTab.this,
+                        "Delete failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
                 }
             });
             return;

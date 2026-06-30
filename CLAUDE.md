@@ -95,7 +95,17 @@ Recent additions:
   cache** (`ai_endpoint_cache`) so similar requests reuse a prior decision with **zero** API calls, a
   truncation budget (`ai_max_chars`), and passing the existing folder list to the model so it reuses
   folders. Keys live only in the local SQLite settings; calls go out via the JDK HttpClient (not Burp).
-  Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection).
+  Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection, **Reset AI
+  grouping**).
+  - **Smart grouping (reworked):** classification is anchored on a coarse *feature key*
+    (`host + first meaningful path segment`, skipping `api`/`v1`/ids) also stored in `ai_endpoint_cache`.
+    Every endpoint under the same base area (e.g. all `/api/users/*`) reuses **one** function folder —
+    its top level is *pinned* from the first sibling, so a new folder is no longer created per request.
+    Folders are capped at **2 levels** (Function/Sub-function); the model is told to group by function
+    and **never** by host/domain/URL (a post-filter also strips host/domain/generic segments). Folder
+    names are matched **canonically** (case/space/plural-insensitive via `FolderRepository.canonical` +
+    `findOrCreatePathCanonical`) so "Users"/"User"/"user management" collapse instead of fragmenting.
+    Exact repeats cost zero API calls; *Reset AI grouping* clears the cache to re-classify from scratch.
 
 Notable behaviours:
 

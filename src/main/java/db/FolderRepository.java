@@ -68,6 +68,53 @@ public class FolderRepository {
         }
     }
 
+    /**
+     * Like {@link #findOrCreatePath(String)} but matches each segment against
+     * existing sibling folders <em>canonically</em> (case-, space- and
+     * plural-insensitive) before creating a new one. This stops the AI organizer
+     * from spawning near-duplicate folders like "Users" / "User" / "user
+     * management" that fragment the tree. New folders keep the supplied casing.
+     */
+    public Long findOrCreatePathCanonical(String path) throws SQLException {
+        if (path == null) return null;
+        List<String> segments = new ArrayList<>();
+        for (String seg : path.split("/")) {
+            String s = seg.trim();
+            if (!s.isEmpty()) segments.add(s);
+        }
+        if (segments.isEmpty()) return null;
+
+        synchronized (db) {
+            List<FolderRecord> all = getAllFolders();
+            Long parentId = null;
+            for (String name : segments) {
+                String norm = canonical(name);
+                Long match = null;
+                for (FolderRecord fr : all) {
+                    if (Objects.equals(fr.parentId(), parentId) && canonical(fr.name()).equals(norm)) {
+                        match = fr.id();
+                        break;
+                    }
+                }
+                if (match == null) {
+                    long created = createFolder(name, parentId);
+                    all.add(new FolderRecord(created, name, parentId, 0, null));
+                    match = created;
+                }
+                parentId = match;
+            }
+            return parentId;
+        }
+    }
+
+    /** Normalized folder-name key: lowercase, alphanumerics only, naive singular. */
+    public static String canonical(String s) {
+        if (s == null) return "";
+        String x = s.toLowerCase().replaceAll("[^a-z0-9]", "");
+        if (x.length() > 3 && x.endsWith("s") && !x.endsWith("ss")) x = x.substring(0, x.length() - 1);
+        return x;
+    }
+
     public List<FolderRecord> getAllFolders() throws SQLException {
         synchronized (db) {
             String sql = "SELECT id, name, parent_id, sort_order, color FROM folders ORDER BY sort_order, name";
@@ -131,6 +178,71 @@ public class FolderRepository {
                 ps.setLong(1, id);
                 ps.executeUpdate();
             }
+        }
+    }
+
+    /**
+     * Deletes a folder <em>and all its sub-folders</em>, moving every test case
+     * found anywhere in that subtree back to the Inbox (folder_id = NULL).
+     *
+     * <p>The plain {@link #deleteFolder(long)} fails with a foreign-key error when
+     * the folder still has children (the AI organizer routinely nests folders),
+     * which is why deleting such folders appeared "impossible". This walks the
+     * whole subtree and removes it bottom-up inside one transaction so the
+     * parent_id self-reference is never left dangling. Returns the ids that were
+     * deleted (subtree root first) so callers can update their selection state.
+     */
+    public List<Long> deleteFolderCascade(long rootId) throws SQLException {
+        synchronized (db) {
+            // 1. Collect the subtree (root + all descendants) breadth-first.
+            List<FolderRecord> all = getAllFolders();
+            Map<Long, List<Long>> childrenOf = new HashMap<>();
+            for (FolderRecord f : all) {
+                if (f.parentId() != null)
+                    childrenOf.computeIfAbsent(f.parentId(), k -> new ArrayList<>()).add(f.id());
+            }
+            List<Long> ordered = new ArrayList<>();   // shallow → deep
+            Deque<Long> queue = new ArrayDeque<>();
+            queue.add(rootId);
+            while (!queue.isEmpty()) {
+                Long cur = queue.poll();
+                ordered.add(cur);
+                List<Long> kids = childrenOf.get(cur);
+                if (kids != null) queue.addAll(kids);
+            }
+
+            Connection conn = db.getConnection();
+            boolean prev = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                // 2. Move every test case in the subtree to the Inbox.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE test_cases SET folder_id = NULL WHERE folder_id = ?")) {
+                    for (Long fid : ordered) { ps.setLong(1, fid); ps.addBatch(); }
+                    ps.executeBatch();
+                }
+                // 3. Delete deepest-first so no row's parent is removed before it.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM folders WHERE id = ?")) {
+                    for (int i = ordered.size() - 1; i >= 0; i--) {
+                        ps.setLong(1, ordered.get(i)); ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                // 4. Drop any AI cache rows that pointed at the removed folders so
+                //    future captures get re-classified instead of resurrecting them.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM ai_endpoint_cache WHERE folder_id = ?")) {
+                    for (Long fid : ordered) { ps.setLong(1, fid); ps.addBatch(); }
+                    ps.executeBatch();
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback(); throw e;
+            } finally {
+                conn.setAutoCommit(prev);
+            }
+            return ordered;
         }
     }
 

@@ -206,11 +206,25 @@ public class SettingsTab extends JPanel {
 
         JButton aiTestBtn = new JButton("Test connection");
         aiTestBtn.addActionListener(e -> testAiConnection());
-        JPanel aiTestPan = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+
+        JButton aiResetBtn = new JButton("Reset AI grouping");
+        aiResetBtn.setToolTipText("Clear the endpoint→folder cache so the next 'Organize with AI' "
+            + "re-classifies everything from scratch. Existing folders are kept.");
+        aiResetBtn.addActionListener(e -> resetAiGrouping());
+
+        JPanel aiTestPan = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         aiTestPan.setAlignmentX(Component.LEFT_ALIGNMENT);
         aiTestPan.add(aiTestBtn);
+        aiTestPan.add(aiResetBtn);
         ai.addContent(gap(4));
         ai.addContent(aiTestPan);
+
+        JLabel reorg = new JLabel("To re-organize existing requests: select them in Library ▸ "
+            + "right-click ▸ \"Organize with AI ✨\".");
+        reorg.setFont(reorg.getFont().deriveFont(Font.ITALIC, 11f));
+        reorg.setAlignmentX(Component.LEFT_ALIGNMENT);
+        ai.addContent(gap(4));
+        ai.addContent(reorg);
 
         form.add(ai);
         form.add(gap(6));
@@ -522,6 +536,26 @@ public class SettingsTab extends JPanel {
     // ── AI test ───────────────────────────────────────────────────────────
 
     /** Pings the provider with a tiny prompt using the CURRENT (unsaved) fields. */
+    private void resetAiGrouping() {
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "Clear the AI endpoint→folder cache?\n\nThe next time you organize requests with AI, "
+            + "every endpoint is re-classified from scratch. Your existing folders and requests "
+            + "are NOT deleted.",
+            "Reset AI grouping", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (confirm != JOptionPane.OK_OPTION) return;
+        loader.submit(() -> {
+            try {
+                new db.AiCacheRepository(db).clear();
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "AI grouping cache cleared.", "Reset AI grouping", JOptionPane.INFORMATION_MESSAGE));
+            } catch (Exception ex) {
+                api.logging().logToError("[BAC] Reset AI grouping failed: " + ex.getMessage());
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "Reset failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
+            }
+        });
+    }
+
     private void testAiConnection() {
         String provider = (String) aiProviderCombo.getSelectedItem();
         String apiKey   = new String(aiApiKeyField.getPassword()).trim();

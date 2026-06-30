@@ -235,7 +235,9 @@ public class TestRunTab extends JPanel {
     /** Builds the CENTER area: verdict summary + JTabbedPane(Results, Matrix). */
     private JPanel buildMainArea() {
         JPanel area = new JPanel(new BorderLayout(0, 4));
-        area.add(buildVerdictSummary(), BorderLayout.NORTH);
+        // (The verdict-count summary bar was removed — it only ate vertical space;
+        // the same tallies are available via the verdict filter toggles and the
+        // Dashboard tab.)
 
         // Results sub-panel
         JPanel resultsPanel = buildResultsPanel();
@@ -258,36 +260,6 @@ public class TestRunTab extends JPanel {
         area.add(subTabs, BorderLayout.CENTER);
         api.userInterface().applyThemeToComponent(area);
         return area;
-    }
-
-    private JPanel buildVerdictSummary() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
-        bar.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
-            BorderFactory.createEmptyBorder(2, 4, 2, 4)));
-
-        // Initialize counts and create one chip per verdict (vector dot + plain text)
-        String[][] verdictDefs = {
-            {RunEngine.POTENTIAL_BAC,   "BAC",      "CC2222"},
-            {RunEngine.ANOMALY,         "ANOMALY",  "CC7700"},
-            {RunEngine.REVIEW,          "REVIEW",   "AA9900"},
-            {RunEngine.LIKELY_ENFORCED, "ENFORCED", "227722"},
-            {RunEngine.EXPECTED_OK,     "OK",       "777777"},
-            {RunEngine.SKIPPED_SAFE,    "SKIPPED",  "555555"},
-            {RunEngine.ERROR,           "ERROR",    "882288"},
-        };
-        for (String[] def : verdictDefs) {
-            verdictCounts.put(def[0], 0);
-            JLabel chip = new JLabel(def[1] + ": 0", BacIcons.verdictDot(def[0]), SwingConstants.LEFT);
-            chip.setIconTextGap(4);
-            chip.setFont(chip.getFont().deriveFont(11f));
-            chip.setBorder(BorderFactory.createEmptyBorder(1, 5, 1, 5));
-            chip.setForeground(new Color(Integer.parseInt(def[2], 16)));
-            verdictCountLabels.put(def[0], chip);
-            bar.add(chip);
-        }
-        api.userInterface().applyThemeToComponent(bar);
-        return bar;
     }
 
     private void incrementVerdictCount(String verdict) {

@@ -246,6 +246,32 @@ public class FolderRepository {
         }
     }
 
+    /**
+     * Full "/"-joined path for every existing folder (root segment first),
+     * sorted. Handed to the AI organizer so it can reuse an existing folder
+     * instead of spawning a near-duplicate when grouping a batch of requests.
+     */
+    public List<String> getAllFolderPaths() throws SQLException {
+        synchronized (db) {
+            List<FolderRecord> all = getAllFolders();
+            Map<Long, FolderRecord> byId = new HashMap<>();
+            for (FolderRecord f : all) byId.put(f.id(), f);
+            List<String> paths = new ArrayList<>();
+            for (FolderRecord f : all) {
+                List<String> segs = new ArrayList<>();
+                FolderRecord cur = f;
+                Set<Long> seen = new HashSet<>();
+                while (cur != null && seen.add(cur.id())) {
+                    segs.add(0, cur.name());
+                    cur = cur.parentId() != null ? byId.get(cur.parentId()) : null;
+                }
+                paths.add(String.join("/", segs));
+            }
+            Collections.sort(paths);
+            return paths;
+        }
+    }
+
     public int countInFolder(long folderId) throws SQLException {
         synchronized (db) {
             String sql = "SELECT COUNT(*) FROM test_cases WHERE folder_id = ?";

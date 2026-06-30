@@ -48,16 +48,25 @@ public class AiClient {
      * Blocks for up to ~30s; always call off the EDT.
      */
     public String complete(String systemPrompt, String userPrompt) throws AiException {
+        return complete(systemPrompt, userPrompt, 256);
+    }
+
+    /**
+     * Same as {@link #complete(String, String)} but with an explicit output
+     * token budget — needed when the reply is a JSON array covering several
+     * items at once (batch classification) rather than a single object.
+     */
+    public String complete(String systemPrompt, String userPrompt, int maxOutputTokens) throws AiException {
         if (config.apiKey() == null || config.apiKey().isBlank()) {
             throw new AiException("No API key configured");
         }
         try {
             return switch (config.provider()) {
                 case "GROQ"       -> openAiCompatible("https://api.groq.com/openai/v1/chat/completions",
-                                                      systemPrompt, userPrompt, false);
+                                                      systemPrompt, userPrompt, false, maxOutputTokens);
                 case "OPENROUTER" -> openAiCompatible("https://openrouter.ai/api/v1/chat/completions",
-                                                      systemPrompt, userPrompt, true);
-                default           -> gemini(systemPrompt, userPrompt);   // GEMINI
+                                                      systemPrompt, userPrompt, true, maxOutputTokens);
+                default           -> gemini(systemPrompt, userPrompt, maxOutputTokens);   // GEMINI
             };
         } catch (AiException e) {
             throw e;
@@ -68,7 +77,7 @@ public class AiClient {
 
     // ---- Gemini ----------------------------------------------------------
 
-    private String gemini(String systemPrompt, String userPrompt) throws Exception {
+    private String gemini(String systemPrompt, String userPrompt, int maxOutputTokens) throws Exception {
         String url = "https://generativelanguage.googleapis.com/v1beta/models/"
                 + config.effectiveModel() + ":generateContent?key="
                 + java.net.URLEncoder.encode(config.apiKey(), StandardCharsets.UTF_8);
@@ -88,7 +97,7 @@ public class AiClient {
 
         JsonObject genCfg = new JsonObject();
         genCfg.addProperty("temperature", 0.2);
-        genCfg.addProperty("maxOutputTokens", 256);
+        genCfg.addProperty("maxOutputTokens", maxOutputTokens);
         genCfg.addProperty("responseMimeType", "application/json");
         body.add("generationConfig", genCfg);
 
@@ -111,11 +120,11 @@ public class AiClient {
     // ---- OpenAI-compatible (Groq / OpenRouter) ---------------------------
 
     private String openAiCompatible(String url, String systemPrompt, String userPrompt,
-                                    boolean openRouter) throws Exception {
+                                    boolean openRouter, int maxOutputTokens) throws Exception {
         JsonObject body = new JsonObject();
         body.addProperty("model", config.effectiveModel());
         body.addProperty("temperature", 0.2);
-        body.addProperty("max_tokens", 256);
+        body.addProperty("max_tokens", maxOutputTokens);
         JsonArray messages = new JsonArray();
         messages.add(message("system", systemPrompt));
         messages.add(message("user", userPrompt));

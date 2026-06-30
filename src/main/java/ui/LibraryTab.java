@@ -790,11 +790,17 @@ public class LibraryTab extends JPanel {
             if (onRunSelected != null) onRunSelected.accept(accountId, tcIds);
         });
 
+        JButton organizeBtn = new JButton("Organize with AI ✨");
+        organizeBtn.setToolTipText("Classify the selected requests together in one AI call "
+            + "so related requests (e.g. all \"settings\" endpoints) end up in the same folder");
+        organizeBtn.addActionListener(e -> organizeSelectedWithAi());
+
         bar.add(selLabel);
         bar.add(new JLabel("Session:"));
         bar.add(sessionCombo);
         bar.add(runBtn);
         bar.add(addToWorkingSet);
+        bar.add(organizeBtn);
         bar.putClientProperty("selLabel", selLabel);
         return bar;
     }
@@ -919,32 +925,7 @@ public class LibraryTab extends JPanel {
             onOpenInCompare.accept(tableModel.getRow(row).id());
         });
 
-        aiOrganizeItem.addActionListener(e -> {
-            int[] rows = table.getSelectedRows();
-            if (rows.length == 0) return;
-            if (aiOrganizer == null || !aiOrganizer.isReady()) {
-                JOptionPane.showMessageDialog(this,
-                    "AI is not active yet.\n\n"
-                    + "Go to Settings ▸ AI Organization, tick \"Enable\", choose a provider,\n"
-                    + "paste your API key, then click \"Test connection\" (a successful test\n"
-                    + "saves and activates it) — or click \"Save Settings\".",
-                    "AI not configured", JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
-            List<Long> tcIds = new ArrayList<>();
-            for (int r : rows) tcIds.add(tableModel.getRow(r).id());
-            statusLabel.setText("  Organizing " + tcIds.size() + " request(s) with AI…");
-            aiOrganizer.organizeSelection(tcIds, msg ->
-                SwingUtilities.invokeLater(() -> {
-                    statusLabel.setText("  " + msg);
-                    refresh();
-                    // Make failures impossible to miss for a user-initiated action.
-                    if (msg != null && (msg.contains("failed") || msg.contains("not configured"))) {
-                        JOptionPane.showMessageDialog(this, msg,
-                            "Organize with AI", JOptionPane.WARNING_MESSAGE);
-                    }
-                }));
-        });
+        aiOrganizeItem.addActionListener(e -> organizeSelectedWithAi());
 
         runPairItem.addActionListener(e -> {
             int[] rows = table.getSelectedRows();
@@ -969,6 +950,38 @@ public class LibraryTab extends JPanel {
             long[] ids = Arrays.stream(rows).mapToLong(r -> tableModel.getRow(r).id()).toArray();
             rebaselineAsync(ids);
         });
+    }
+
+    /**
+     * Organizes the current table selection with AI in one batched pass (right-click
+     * "Organize with AI ✨" or the action-bar button) — pick any number of requests
+     * and they're classified together so related ones land in the same folder.
+     */
+    private void organizeSelectedWithAi() {
+        int[] rows = table.getSelectedRows();
+        if (rows.length == 0) return;
+        if (aiOrganizer == null || !aiOrganizer.isReady()) {
+            JOptionPane.showMessageDialog(this,
+                "AI is not active yet.\n\n"
+                + "Go to Settings ▸ AI Organization, tick \"Enable\", choose a provider,\n"
+                + "paste your API key, then click \"Test connection\" (a successful test\n"
+                + "saves and activates it) — or click \"Save Settings\".",
+                "AI not configured", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        List<Long> tcIds = new ArrayList<>();
+        for (int r : rows) tcIds.add(tableModel.getRow(r).id());
+        statusLabel.setText("  Organizing " + tcIds.size() + " request(s) with AI…");
+        aiOrganizer.organizeSelection(tcIds, msg ->
+            SwingUtilities.invokeLater(() -> {
+                statusLabel.setText("  " + msg);
+                refresh();
+                // Make failures impossible to miss for a user-initiated action.
+                if (msg != null && (msg.contains("failed") || msg.contains("not configured"))) {
+                    JOptionPane.showMessageDialog(this, msg,
+                        "Organize with AI", JOptionPane.WARNING_MESSAGE);
+                }
+            }));
     }
 
     private void rebaselineAsync(long[] tcIds) {

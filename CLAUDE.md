@@ -97,17 +97,33 @@ Recent additions:
   folders. Keys live only in the local SQLite settings; calls go out via the JDK HttpClient (not Burp).
   Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection, **Reset AI
   grouping**).
-  - **URL-path grouping (deterministic):** the folder is built **from the request's URL path**, not by
-    the model — `AiOrganizer.urlFolderPath` mirrors the path segments with resource ids dropped
-    (`/api/users/123/posts → "api/users/posts"`), so the same URL area always maps to the same path.
-    `FolderRepository.findOrCreatePathCanonical` then **reuses an existing folder** (case/space/plural-
-    insensitive via `FolderRepository.canonical`) instead of spawning a new one per request — this is
-    what eliminates the "a new folder for every request" fragmentation. A path with no meaningful
-    segment leaves the request in the Inbox.
-  - **Naming:** the LLM (when configured) is asked for **only** a concise name + one-line description
-    (`AiOrganizer.describe`); the folder is never decided by the model. Each exact endpoint signature is
-    named at most once (cached in `ai_endpoint_cache`); repeats and AI-off both fall back to a readable
-    `METHOD last-segment` name with **zero** API calls. *Reset AI grouping* clears the cache.
+  - **Auto-capture (single item, deterministic folder):** `AiOrganizer.organizeOne` (used by
+    `organizeOnCapture`) places the folder **from the request's URL path**, not the model —
+    `AiOrganizer.urlFolderPath` mirrors the path segments with resource ids dropped
+    (`/api/users/123/posts → "api/users/posts"`) — but first checks two zero-cost reuse tiers:
+    (1) an exact endpoint-signature cache hit (`ai_endpoint_cache`), and (2) `featureKey` reuse —
+    any other endpoint sharing the same host + first meaningful path segment reuses *its* folder. Only
+    when neither hits does it fall back to the literal URL-mirrored path via
+    `FolderRepository.findOrCreatePathCanonical` (case/space/plural-insensitive reuse). The LLM here
+    is asked for **only** name + one-line description (`AiOrganizer.describe`); it never picks the
+    folder. A path with no meaningful segment leaves the request in the Inbox.
+  - **Manual batch organize (Library ▸ select many ▸ "Organize with AI ✨", context menu or the
+    action-bar button):** `AiOrganizer.organizeSelection` → `organizeBatch` classifies the **whole
+    selection in one (or a few, chunked at `BATCH_SIZE`=15) AI call(s)**, not one call per request.
+    The prompt hands the model every selected item plus the existing folder-path list
+    (`FolderRepository.getAllFolderPaths`) and asks it to group by **functional area** — requests
+    that serve the same feature can share one folder even when their URL paths differ (e.g.
+    `/api/profile` and `/user/preferences` both → "Settings") — reusing an existing folder where it
+    fits. `AiOrganizer.classifyChunk` parses the returned JSON array (`AiOrganizer.parseChunk` /
+    `extractJsonArray`) and applies + caches each item's AI-chosen folder. Cache hits (already-seen
+    signatures) are applied directly with **zero** API calls before any chunk is sent. If a chunk call
+    fails, its items fall back to the deterministic per-item placement above so the selection still
+    gets filed. Because the cache now stores (and `organizeOne`/`organizeOnCapture` now **honor**) the
+    AI-chosen folder id, a semantic grouping made via batch organize sticks for future captures of the
+    same endpoint instead of being overwritten by the literal URL mirror.
+  - Each exact endpoint signature is named/foldered at most once (cached in `ai_endpoint_cache`);
+    repeats and AI-off both fall back to a readable `METHOD last-segment` name with **zero** API
+    calls. *Reset AI grouping* (Settings) clears the cache.
 
 Notable behaviours:
 

@@ -100,7 +100,12 @@ public class AiOrganizer {
 
     /**
      * Manual "Organize with AI" on a selection. Moves requests regardless of
-     * their current folder. Reports a one-line summary through {@code onDone}.
+     * their current folder. Unlike {@link #organizeOnCapture}, this classifies
+     * the WHOLE selection together in as few AI calls as possible (one call per
+     * chunk of up to {@value #BATCH_SIZE} items, not one call per request) so the
+     * model can see every item at once and group functionally related requests
+     * into the SAME folder even when their URL paths differ. Reports a one-line
+     * summary through {@code onDone}.
      */
     public void organizeSelection(List<Long> ids, Consumer<String> onDone) {
         AiConfig cfg = AiConfig.load(db);
@@ -108,64 +113,78 @@ public class AiOrganizer {
             if (onDone != null) onDone.accept("AI is not configured. Enable it and set an API key in Settings.");
             return;
         }
-        worker.submit(() -> {
-            int ok = 0, fail = 0;
-            String lastError = null;
-            for (long id : ids) {
-                try {
-                    TestCaseRow row = tcRepo.getById(id).orElse(null);
-                    if (row == null) { fail++; continue; }
-                    organizeOne(cfg, row, true);
-                    ok++;
+        worker.submit(() -> organizeBatch(cfg, ids, onDone));
+    }
+
+    private static final int BATCH_SIZE = 15;
+
+    private void organizeBatch(AiConfig cfg, List<Long> ids, Consumer<String> onDone) {
+        int cached = 0, classified = 0, fail = 0;
+        String lastError = null;
+        List<TestCaseRow> pending = new ArrayList<>();
+
+        // Pass 1: anything already known for this exact endpoint costs nothing.
+        for (long id : ids) {
+            try {
+                TestCaseRow row = tcRepo.getById(id).orElse(null);
+                if (row == null) { fail++; continue; }
+                if (applyCachedIfPresent(row)) {
+                    cached++;
                     if (onChanged != null) onChanged.run();
-                } catch (Exception e) {
-                    fail++;
-                    lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                    api.logging().logToError("[BAC][AI] Organize #" + id + ": " + lastError);
+                } else {
+                    pending.add(row);
                 }
+            } catch (Exception e) {
+                fail++;
+                lastError = msg(e);
+                api.logging().logToError("[BAC][AI] Cache lookup #" + id + ": " + lastError);
             }
-            if (onDone != null) {
-                String summary = "AI organized " + ok + " request(s)";
-                if (fail > 0) summary += ", " + fail + " failed — " + lastError;
-                else summary += ".";
-                onDone.accept(summary);
+        }
+
+        // Pass 2: classify the rest together, in chunks, so related items land
+        // in one shared folder instead of each spawning its own.
+        for (int start = 0; start < pending.size(); start += BATCH_SIZE) {
+            List<TestCaseRow> chunk = pending.subList(start, Math.min(start + BATCH_SIZE, pending.size()));
+            status("AI grouping " + chunk.size() + " request(s)…");
+            try {
+                classified += classifyChunk(cfg, chunk);
+                if (onChanged != null) onChanged.run();
+            } catch (Exception e) {
+                lastError = msg(e);
+                api.logging().logToError("[BAC][AI] Batch classify failed (" + chunk.size()
+                        + " items): " + lastError);
+                // Don't leave the selection untouched — file each item by URL alone.
+                for (TestCaseRow row : chunk) {
+                    try { applyFallback(row); classified++; }
+                    catch (Exception inner) { fail++; }
+                }
+                if (onChanged != null) onChanged.run();
             }
-        });
+        }
+
+        if (onDone != null) {
+            StringBuilder summary = new StringBuilder("AI organized " + (cached + classified) + " request(s)");
+            if (cached > 0) summary.append(" (").append(cached).append(" from cache)");
+            if (fail > 0) summary.append(", ").append(fail).append(" failed — ").append(lastError);
+            else summary.append('.');
+            onDone.accept(summary.toString());
+        }
+    }
+
+    private static String msg(Exception e) {
+        return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
     }
 
     // ---- Core ------------------------------------------------------------
 
     private void organizeOne(AiConfig cfg, TestCaseRow row, boolean overrideFolder) throws Exception {
+        if (applyCachedIfPresent(row)) return;
+
         String signature  = signature(row.method(), row.host(), row.url());
         String featureKey = featureKey(row.host(), row.url());
-
-        // ── Folder = the URL path itself (deterministic). ──────────────────
-        // Folders mirror the request's URL path segments (ids dropped); the same
-        // area therefore ALWAYS resolves to the same folder, and findOrCreatePath-
-        // Canonical reuses an existing folder instead of making a new one. This is
-        // what guarantees requests of the same endpoint group together.
-        String folderPath = urlFolderPath(row.url());
+        String folderPath = resolveFolderPath(featureKey, row.url());
         Long folderId = folderPath == null ? null
                 : folderRepo.findOrCreatePathCanonical(folderPath);
-
-        // ── Name + description. ────────────────────────────────────────────
-        // Reuse a cached name/description for this exact endpoint (no API call).
-        // Otherwise ask the model once (when configured); if that fails or AI is
-        // off, fall back to a readable name derived from the URL so the request
-        // is still placed and named.
-        CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
-        String name, desc;
-        if (exact != null && exact.name() != null && !exact.name().isBlank()) {
-            name = exact.name();
-            desc = exact.description();
-            apply(row.id(), name, desc, folderId);
-            cacheRepo.put(signature, featureKey, folderId,
-                    folderPath != null ? folderPath : "", name, desc);
-            api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
-                    + folderPath + " (cached name, no API call).");
-            status("AI ✓ grouped → " + folderPath + " (cached)");
-            return;
-        }
 
         Parsed p = null;
         if (cfg.isConfigured()) {
@@ -176,6 +195,7 @@ public class AiOrganizer {
                         + " (filed by URL anyway): " + e.getMessage());
             }
         }
+        String name, desc;
         if (p != null && p.name() != null && !p.name().isBlank()) {
             name = sanitizeName(p.name());
             desc = sanitizeDescription(p.description());
@@ -190,6 +210,135 @@ public class AiOrganizer {
         api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
                 + " as \"" + name + "\".");
         status("AI ✓ " + name + " → " + folderPath);
+    }
+
+    /**
+     * Applies a previously cached classification for this exact endpoint
+     * signature, if one exists, at zero API cost. Returns {@code false} when
+     * nothing is cached yet so the caller knows it still needs classifying.
+     */
+    private boolean applyCachedIfPresent(TestCaseRow row) throws Exception {
+        String signature = signature(row.method(), row.host(), row.url());
+        CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
+        if (exact == null || exact.name() == null || exact.name().isBlank()) return false;
+
+        // Honor the folder chosen the last time this endpoint was classified
+        // (which may be a semantic batch grouping) instead of recomputing it
+        // from the URL — otherwise a smarter folder choice would never stick.
+        Long folderId = exact.folderId();
+        String folderPath = exact.folderPath();
+        if (folderId == null) {
+            folderPath = resolveFolderPath(featureKey(row.host(), row.url()), row.url());
+            folderId = folderPath == null ? null : folderRepo.findOrCreatePathCanonical(folderPath);
+        }
+        apply(row.id(), exact.name(), exact.description(), folderId);
+        api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
+                + folderPath + " (cached, no API call).");
+        status("AI ✓ grouped → " + folderPath + " (cached)");
+        return true;
+    }
+
+    /**
+     * Folder for a request that has no exact-signature cache entry yet. Reuses
+     * the folder already chosen for any other endpoint sharing the same coarse
+     * {@code featureKey} (zero-cost grouping across resource ids within one
+     * area), falling back to the deterministic URL-mirrored path otherwise.
+     */
+    private String resolveFolderPath(String featureKey, String url) throws Exception {
+        CacheEntry byFeature = cacheRepo.lookupByFeatureKey(featureKey).orElse(null);
+        if (byFeature != null && byFeature.folderId() != null && byFeature.folderPath() != null) {
+            return byFeature.folderPath();
+        }
+        return urlFolderPath(url);
+    }
+
+    /** Deterministic, AI-free placement — used when a batch classification call fails. */
+    private void applyFallback(TestCaseRow row) throws Exception {
+        String signature  = signature(row.method(), row.host(), row.url());
+        String featureKey = featureKey(row.host(), row.url());
+        String folderPath = resolveFolderPath(featureKey, row.url());
+        Long folderId = folderPath == null ? null : folderRepo.findOrCreatePathCanonical(folderPath);
+        String name = fallbackName(row);
+        apply(row.id(), name, null, folderId);
+        cacheRepo.put(signature, featureKey, folderId, folderPath != null ? folderPath : "", name, null);
+    }
+
+    /**
+     * Classifies a whole chunk of requests in ONE model call so functionally
+     * related items (e.g. several different "settings" endpoints) land in the
+     * same folder instead of each spawning its own. Returns the number of items
+     * successfully applied; throws when the call/parse fails entirely so the
+     * caller can fall back per-item.
+     */
+    private int classifyChunk(AiConfig cfg, List<TestCaseRow> chunk) throws Exception {
+        List<String> existingFolders = folderRepo.getAllFolderPaths();
+
+        String system = """
+            You organize a batch of captured HTTP requests for a security tester
+            into a folder tree, grouped by FUNCTIONAL AREA — not by literal URL
+            path. Requests that serve the same feature/page/purpose MUST share the
+            SAME folder even when their URL paths differ (e.g. "/api/profile" and
+            "/user/preferences" can both belong in "Settings"). Prefer reusing one
+            of the EXISTING FOLDERS listed below when an item clearly belongs
+            there. Otherwise invent a short folder path (use "/" to nest, max 3
+            levels, e.g. "Checkout/Payment"). Keep distinct, unrelated items in
+            different folders — don't over-merge. Reply with ONLY a JSON array (no
+            markdown), one object per item, in the SAME ORDER given, each with
+            exactly these keys:
+              "idx": the item's number as given (integer),
+              "folder": the folder path for this item,
+              "name": a very short human-readable name for THIS request (max 6 words),
+              "description": what the request does and its purpose (max 14 words).""";
+
+        int perItemBudget = Math.max(80, cfg.maxChars() / Math.max(1, chunk.size()));
+        int reqBudget  = Math.max(30, (int) (perItemBudget * 0.4));
+        int respBudget = Math.max(40, perItemBudget - reqBudget);
+
+        StringBuilder user = new StringBuilder();
+        if (!existingFolders.isEmpty()) {
+            user.append("EXISTING FOLDERS:\n");
+            for (String f : existingFolders) user.append("- ").append(f).append('\n');
+            user.append('\n');
+        }
+        user.append("ITEMS:\n");
+        for (int i = 0; i < chunk.size(); i++) {
+            TestCaseRow row = chunk.get(i);
+            String reqText  = squeeze(decode(tcRepo.getRequestRaw(row.id())));
+            String respText = squeeze(decode(tcRepo.getPrimaryBaselineResponse(row.id())));
+            user.append('[').append(i + 1).append("] ").append(row.method()).append(' ')
+                .append(pathOnly(row.url())).append('\n');
+            user.append("  req: ").append(truncate(reqText, reqBudget)).append('\n');
+            user.append("  resp: ").append(truncate(respText, respBudget)).append('\n');
+        }
+
+        int maxOutputTokens = Math.min(4096, Math.max(256, chunk.size() * 100 + 200));
+        String raw = new AiClient(cfg).complete(system, user.toString(), maxOutputTokens);
+        List<ChunkItem> items = parseChunk(raw);
+        if (items == null || items.isEmpty()) {
+            throw new Exception("Could not parse model reply: " + snippet(raw));
+        }
+
+        int applied = 0;
+        for (ChunkItem item : items) {
+            if (item.idx < 1 || item.idx > chunk.size()) continue;
+            TestCaseRow row = chunk.get(item.idx - 1);
+            String name = sanitizeName(item.name);
+            if (name == null || name.isBlank()) name = fallbackName(row);
+            String desc = sanitizeDescription(item.description);
+            String folderPath = item.folder != null ? item.folder.trim() : null;
+            if (folderPath != null && folderPath.isEmpty()) folderPath = null;
+            Long folderId = folderPath == null ? null : folderRepo.findOrCreatePathCanonical(folderPath);
+
+            apply(row.id(), name, desc, folderId);
+            String signature  = signature(row.method(), row.host(), row.url());
+            String featureKey = featureKey(row.host(), row.url());
+            cacheRepo.put(signature, featureKey, folderId, folderPath != null ? folderPath : "", name, desc);
+            applied++;
+        }
+        api.logging().logToOutput("[BAC][AI] Batch-grouped " + applied + "/" + chunk.size()
+                + " request(s) in one call.");
+        status("AI ✓ grouped " + applied + " request(s)");
+        return applied;
     }
 
     /** Asks the model for a concise name + description only (folder is URL-derived). */
@@ -375,6 +524,11 @@ public class AiOrganizer {
         return s.substring(0, max) + "\n…[truncated]";
     }
 
+    /** Collapses whitespace so a small per-item char budget covers more signal. */
+    private static String squeeze(String s) {
+        return s == null ? "" : s.replaceAll("\\s+", " ").trim();
+    }
+
     private static String snippet(String s) {
         if (s == null) return "null";
         s = s.replaceAll("\\s+", " ").trim();
@@ -403,6 +557,52 @@ public class AiOrganizer {
 
     private static String str(JsonObject o, String key) {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : null;
+    }
+
+    private record ChunkItem(int idx, String folder, String name, String description) {}
+
+    /** Parses the batch-classification reply: a JSON array of per-item objects. */
+    private static List<ChunkItem> parseChunk(String raw) {
+        if (raw == null) return null;
+        String json = extractJsonArray(raw);
+        if (json == null) return null;
+        try {
+            var arr = JsonParser.parseString(json).getAsJsonArray();
+            List<ChunkItem> out = new ArrayList<>();
+            for (var el : arr) {
+                if (!el.isJsonObject()) continue;
+                JsonObject o = el.getAsJsonObject();
+                int idx = o.has("idx") && !o.get("idx").isJsonNull() ? o.get("idx").getAsInt() : -1;
+                out.add(new ChunkItem(idx, str(o, "folder"), str(o, "name"), str(o, "description")));
+            }
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Extracts the first balanced [...] array from a possibly fenced reply. */
+    static String extractJsonArray(String raw) {
+        int start = raw.indexOf('[');
+        if (start < 0) return null;
+        int depth = 0;
+        boolean inStr = false, esc = false;
+        for (int i = start; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (inStr) {
+                if (esc) esc = false;
+                else if (c == '\\') esc = true;
+                else if (c == '"') inStr = false;
+            } else {
+                if (c == '"') inStr = true;
+                else if (c == '[') depth++;
+                else if (c == ']') {
+                    depth--;
+                    if (depth == 0) return raw.substring(start, i + 1);
+                }
+            }
+        }
+        return null;
     }
 
     /** Extracts the first balanced {...} object from a possibly fenced reply. */

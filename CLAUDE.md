@@ -97,15 +97,17 @@ Recent additions:
   folders. Keys live only in the local SQLite settings; calls go out via the JDK HttpClient (not Burp).
   Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection, **Reset AI
   grouping**).
-  - **Smart grouping (reworked):** classification is anchored on a coarse *feature key*
-    (`host + first meaningful path segment`, skipping `api`/`v1`/ids) also stored in `ai_endpoint_cache`.
-    Every endpoint under the same base area (e.g. all `/api/users/*`) reuses **one** function folder —
-    its top level is *pinned* from the first sibling, so a new folder is no longer created per request.
-    Folders are capped at **2 levels** (Function/Sub-function); the model is told to group by function
-    and **never** by host/domain/URL (a post-filter also strips host/domain/generic segments). Folder
-    names are matched **canonically** (case/space/plural-insensitive via `FolderRepository.canonical` +
-    `findOrCreatePathCanonical`) so "Users"/"User"/"user management" collapse instead of fragmenting.
-    Exact repeats cost zero API calls; *Reset AI grouping* clears the cache to re-classify from scratch.
+  - **URL-path grouping (deterministic):** the folder is built **from the request's URL path**, not by
+    the model — `AiOrganizer.urlFolderPath` mirrors the path segments with resource ids dropped
+    (`/api/users/123/posts → "api/users/posts"`), so the same URL area always maps to the same path.
+    `FolderRepository.findOrCreatePathCanonical` then **reuses an existing folder** (case/space/plural-
+    insensitive via `FolderRepository.canonical`) instead of spawning a new one per request — this is
+    what eliminates the "a new folder for every request" fragmentation. A path with no meaningful
+    segment leaves the request in the Inbox.
+  - **Naming:** the LLM (when configured) is asked for **only** a concise name + one-line description
+    (`AiOrganizer.describe`); the folder is never decided by the model. Each exact endpoint signature is
+    named at most once (cached in `ai_endpoint_cache`); repeats and AI-off both fall back to a readable
+    `METHOD last-segment` name with **zero** API calls. *Reset AI grouping* clears the cache.
 
 Notable behaviours:
 

@@ -7,7 +7,6 @@ import db.AiCacheRepository;
 import db.AiCacheRepository.CacheEntry;
 import db.DatabaseManager;
 import db.FolderRepository;
-import db.FolderRepository.FolderRecord;
 import db.TestCaseRepository;
 import db.TestCaseRepository.TestCaseRow;
 
@@ -140,83 +139,102 @@ public class AiOrganizer {
         String signature  = signature(row.method(), row.host(), row.url());
         String featureKey = featureKey(row.host(), row.url());
 
-        // 1. Exact endpoint already classified → reuse name+desc+folder, no API.
+        // ── Folder = the URL path itself (deterministic). ──────────────────
+        // Folders mirror the request's URL path segments (ids dropped); the same
+        // area therefore ALWAYS resolves to the same folder, and findOrCreatePath-
+        // Canonical reuses an existing folder instead of making a new one. This is
+        // what guarantees requests of the same endpoint group together.
+        String folderPath = urlFolderPath(row.url());
+        Long folderId = folderPath == null ? null
+                : folderRepo.findOrCreatePathCanonical(folderPath);
+
+        // ── Name + description. ────────────────────────────────────────────
+        // Reuse a cached name/description for this exact endpoint (no API call).
+        // Otherwise ask the model once (when configured); if that fails or AI is
+        // off, fall back to a readable name derived from the URL so the request
+        // is still placed and named.
         CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
-        if (exact != null) {
-            Long folderId = folderRepo.findOrCreatePathCanonical(exact.folderPath());
-            apply(row.id(), exact.name(), exact.description(), folderId);
-            // Refresh the folder id in case the folder had been deleted/recreated.
-            cacheRepo.put(signature, featureKey, folderId, exact.folderPath(),
-                    exact.name(), exact.description());
+        String name, desc;
+        if (exact != null && exact.name() != null && !exact.name().isBlank()) {
+            name = exact.name();
+            desc = exact.description();
+            apply(row.id(), name, desc, folderId);
+            cacheRepo.put(signature, featureKey, folderId,
+                    folderPath != null ? folderPath : "", name, desc);
             api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
-                    + exact.folderPath() + " (cached, no API call).");
-            status("AI ✓ grouped → " + exact.folderPath() + " (cached)");
+                    + folderPath + " (cached name, no API call).");
+            status("AI ✓ grouped → " + folderPath + " (cached)");
             return;
         }
 
-        // 2. A sibling endpoint of the same feature was classified before → pin its
-        //    TOP-level function folder so this request lands in the same place.
-        //    This is what stops "a new folder per request": everything under the
-        //    same base path (e.g. /api/users/*) shares one function folder.
-        CacheEntry feature = cacheRepo.lookupByFeatureKey(featureKey).orElse(null);
-        String pinnedTop = feature != null ? topSegment(feature.folderPath()) : null;
+        Parsed p = null;
+        if (cfg.isConfigured()) {
+            try {
+                p = describe(cfg, row);
+            } catch (Exception e) {
+                api.logging().logToError("[BAC][AI] Naming call failed for #" + row.id()
+                        + " (filed by URL anyway): " + e.getMessage());
+            }
+        }
+        if (p != null && p.name() != null && !p.name().isBlank()) {
+            name = sanitizeName(p.name());
+            desc = sanitizeDescription(p.description());
+        } else {
+            name = fallbackName(row);
+            desc = null;
+        }
 
-        // 3. Ask the model for a concise name + description (and a sub-folder when
-        //    the top folder is pinned, otherwise the full ≤2-level function path).
+        apply(row.id(), name, desc, folderId);
+        cacheRepo.put(signature, featureKey, folderId,
+                folderPath != null ? folderPath : "", name, desc);
+        api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
+                + " as \"" + name + "\".");
+        status("AI ✓ " + name + " → " + folderPath);
+    }
+
+    /** Asks the model for a concise name + description only (folder is URL-derived). */
+    private Parsed describe(AiConfig cfg, TestCaseRow row) throws Exception {
         String reqText  = decode(tcRepo.getRequestRaw(row.id()));
         String respText = decode(tcRepo.getPrimaryBaselineResponse(row.id()));
-        List<String> existingFolders = existingFolderPaths();
 
         String system = """
-            You organize captured HTTP requests for a security tester into a tidy,
-            REUSABLE folder tree. Group requests by the application FUNCTION they serve
-            (e.g. Authentication, Users, Profile, Admin, Payments, Cart, Search) — NEVER
-            by host, domain, URL or path. Folders must be at most 2 levels deep
-            (Function/Sub-function, e.g. "Users/Profile" or "Admin/Roles").
-            Strongly prefer an existing folder from the provided list; only invent a new
-            one when nothing fits. Keep names short and consistent so similar requests
-            collapse together instead of each getting its own folder.
+            You label a captured HTTP request for a security tester.
             Reply with ONLY a JSON object (no markdown), with exactly these keys:
               "name": a very short human-readable name for THIS request (max 6 words),
-              "description": what the request does and its purpose (max 14 words),
-              "folder": the chosen "/"-separated function folder path (max 2 levels).""";
+              "description": what the request does and its purpose (max 14 words).
+            Be concise and consistent.""";
 
         StringBuilder user = new StringBuilder();
         user.append("Endpoint: ").append(row.method()).append(' ')
             .append(pathOnly(row.url())).append('\n');
-        if (pinnedTop != null) {
-            user.append("This request belongs to the existing function \"").append(pinnedTop)
-                .append("\". Use \"").append(pinnedTop)
-                .append("\" as the first folder level (optionally add ONE sub-folder under it).\n");
-        }
-        if (!existingFolders.isEmpty()) {
-            user.append("Existing folders (reuse when appropriate):\n");
-            for (String f : existingFolders) user.append("  - ").append(f).append('\n');
-        }
         int reqBudget  = Math.max(200, (int) (cfg.maxChars() * 0.45));
         int respBudget = Math.max(200, cfg.maxChars() - reqBudget);
         user.append("\n--- REQUEST ---\n").append(truncate(reqText, reqBudget));
         user.append("\n--- RESPONSE ---\n").append(truncate(respText, respBudget));
 
-        AiClient client = new AiClient(cfg);
-        String raw = client.complete(system, user.toString());
+        String raw = new AiClient(cfg).complete(system, user.toString());
         Parsed p = parse(raw);
         if (p == null) {
             api.logging().logToError("[BAC][AI] Could not parse model reply for #" + row.id()
                     + ": " + snippet(raw));
-            return;
         }
+        return p;
+    }
 
-        String folderPath = sanitizeFolderPath(p.folder, row.url(), row.host(), pinnedTop);
-        String name = sanitizeName(p.name);
-        String desc = sanitizeDescription(p.description);
-
-        Long folderId = folderRepo.findOrCreatePathCanonical(folderPath);
-        apply(row.id(), name, desc, folderId);
-        cacheRepo.put(signature, featureKey, folderId, folderPath, name, desc);
-        api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
-                + " as \"" + name + "\"" + (pinnedTop != null ? " (grouped under " + pinnedTop + ")" : "") + ".");
-        status("AI ✓ " + name + " → " + folderPath);
+    /** Readable name from method + last meaningful path segment (no API needed). */
+    private static String fallbackName(TestCaseRow row) {
+        String last = null;
+        try {
+            String path = new URI(row.url()).getPath();
+            if (path != null) {
+                for (String seg : path.split("/")) {
+                    if (seg.isEmpty() || isIdLike(seg)) continue;
+                    last = seg;
+                }
+            }
+        } catch (Exception ignored) {}
+        String method = row.method() != null ? row.method().toUpperCase() : "REQ";
+        return last != null ? method + " " + last : method + " request";
     }
 
     private void apply(long tcId, String name, String description, Long folderId) throws Exception {
@@ -292,14 +310,35 @@ public class AiOrganizer {
         return h + "|" + (feature != null ? feature : "/");
     }
 
-    /** First "/"-separated segment of a folder path, or null. */
-    private static String topSegment(String folderPath) {
-        if (folderPath == null) return null;
-        for (String seg : folderPath.split("/")) {
-            String s = seg.trim();
-            if (!s.isEmpty()) return s;
+    /**
+     * Builds a folder path that mirrors the URL's path segments, with resource
+     * ids dropped (e.g. {@code /api/users/123/posts → "api/users/posts"}).
+     * Returns {@code null} when there is no meaningful segment, so such requests
+     * stay in the Inbox instead of creating junk folders.
+     *
+     * <p>This is the deterministic grouping the user asked for: the same URL area
+     * always maps to the same path, and {@code findOrCreatePathCanonical} reuses
+     * an existing folder rather than spawning a new one per request.
+     */
+    static String urlFolderPath(String url) {
+        String path;
+        try {
+            path = new URI(url).getPath();
+        } catch (Exception e) {
+            int slash = url.indexOf('/', url.indexOf("//") + 2);
+            path = slash >= 0 ? url.substring(slash) : "/";
         }
-        return null;
+        if (path == null) return null;
+        List<String> segs = new ArrayList<>();
+        for (String seg : path.split("/")) {
+            if (seg.isEmpty() || isIdLike(seg)) continue;     // drop empties + resource ids
+            String s = seg.replaceAll("[\\\\/:*?\"<>|]", " ").replaceAll("\\s+", " ").trim();
+            if (s.isEmpty()) continue;
+            if (s.length() > 40) s = s.substring(0, 40).trim();
+            segs.add(s);
+            if (segs.size() >= 6) break;                       // safety cap on depth
+        }
+        return segs.isEmpty() ? null : String.join("/", segs);
     }
 
     /** Path (+ query) of a URL, without scheme/host — keeps the prompt host-free. */
@@ -323,35 +362,6 @@ public class AiOrganizer {
             if (digits >= 2) return true;
         }
         return false;
-    }
-
-    private List<String> existingFolderPaths() {
-        try {
-            List<FolderRecord> all = folderRepo.getAllFolders();
-            Map<Long, FolderRecord> byId = new HashMap<>();
-            for (FolderRecord f : all) byId.put(f.id(), f);
-            List<String> paths = new ArrayList<>();
-            for (FolderRecord f : all) {
-                StringBuilder sb = new StringBuilder();
-                FolderRecord cur = f;
-                int guard = 0;
-                Deque<String> stack = new ArrayDeque<>();
-                while (cur != null && guard++ < 10) {
-                    stack.push(cur.name());
-                    cur = cur.parentId() != null ? byId.get(cur.parentId()) : null;
-                }
-                while (!stack.isEmpty()) {
-                    if (sb.length() > 0) sb.append('/');
-                    sb.append(stack.pop());
-                }
-                if (sb.length() > 0) paths.add(sb.toString());
-            }
-            // Cap to keep the prompt small (token control).
-            if (paths.size() > 60) return paths.subList(0, 60);
-            return paths;
-        } catch (Exception e) {
-            return List.of();
-        }
     }
 
     private static String decode(byte[] raw) {
@@ -433,57 +443,4 @@ public class AiOrganizer {
         return s.isEmpty() ? null : s;
     }
 
-    /**
-     * Cleans the model's folder path into a tidy ≤2-level function path:
-     * drops id-like / host- / domain-like segments (so we never get a folder
-     * named after the site), pins the top folder when grouping by feature, and
-     * falls back to the first meaningful URL path segment.
-     */
-    private static String sanitizeFolderPath(String folder, String url, String host, String pinnedTop) {
-        String hostNorm = host == null ? "" : host.toLowerCase();
-        List<String> out = new ArrayList<>();
-        if (folder != null) {
-            for (String seg : folder.split("/")) {
-                String s = seg.replaceAll("[\\\\:*?\"<>|]", " ").replaceAll("\\s+", " ").trim();
-                if (s.isEmpty() || isIdLike(s)) continue;
-                // Never let the model use the host/domain (or a domain-like token).
-                String low = s.toLowerCase();
-                if (low.equals(hostNorm) || hostNorm.startsWith(low + ".")
-                        || low.contains(".") || GENERIC_SEGMENTS.contains(low) || isVersionSegment(low)) continue;
-                if (s.length() > 40) s = s.substring(0, 40).trim();
-                out.add(s);
-                if (out.size() >= 2) break;   // max 2 levels (Function/Sub-function)
-            }
-        }
-        // Force the pinned top folder so siblings of the same feature stay together.
-        if (pinnedTop != null && !pinnedTop.isBlank()) {
-            String topNorm = FolderRepository.canonical(pinnedTop);
-            if (out.isEmpty() || !FolderRepository.canonical(out.get(0)).equals(topNorm)) {
-                out.add(0, pinnedTop);
-                if (out.size() > 2) out = new ArrayList<>(out.subList(0, 2));
-            }
-        }
-        if (out.isEmpty()) {
-            // Fallback: derive a single folder from the first meaningful path segment.
-            try {
-                String path = new URI(url).getPath();
-                if (path != null) {
-                    for (String seg : path.split("/")) {
-                        if (seg.isEmpty() || isIdLike(seg)) continue;
-                        String low = seg.toLowerCase();
-                        if (GENERIC_SEGMENTS.contains(low) || isVersionSegment(low)) continue;
-                        String s = seg.replaceAll("[^A-Za-z0-9 _-]", "").trim();
-                        if (!s.isEmpty()) { out.add(capitalize(s)); break; }
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-        if (out.isEmpty()) out.add("Uncategorized");
-        return String.join("/", out);
-    }
-
-    private static String capitalize(String s) {
-        if (s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
 }

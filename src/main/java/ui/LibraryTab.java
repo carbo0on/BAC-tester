@@ -602,14 +602,17 @@ public class LibraryTab extends JPanel {
             FolderNode fn = selectedFolderNode();
             if (fn == null || fn.id() == null) return;
             int confirm = JOptionPane.showConfirmDialog(this,
-                "Delete folder \"" + fn.displayName() + "\"?\nTest cases inside will move to Inbox.",
+                "Delete folder \"" + fn.displayName() + "\" and all its sub-folders?"
+                    + "\nTest cases inside (and in sub-folders) will move to Inbox.",
                 "Delete Folder", JOptionPane.YES_NO_OPTION);
             if (confirm != JOptionPane.YES_OPTION) return;
             long id = fn.id();
             loader.submit(() -> {
                 try {
-                    for (TestCaseRow row : tcRepo.getByFolder(id)) tcRepo.moveToFolder(row.id(), null);
-                    folderRepo.deleteFolder(id);
+                    // Cascade: removes the whole subtree and re-homes its test cases
+                    // to Inbox in one transaction (a plain delete fails when the
+                    // folder has AI-created sub-folders — FK on parent_id).
+                    folderRepo.deleteFolderCascade(id);
                     SwingUtilities.invokeLater(() -> { selectedFolderIdState = null; refresh(); });
                 } catch (Exception ex) { api.logging().logToError("[BAC] Delete folder: " + ex.getMessage()); }
             });

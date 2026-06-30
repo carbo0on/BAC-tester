@@ -104,10 +104,33 @@ public class AccountRepository {
 
     public void delete(long id) throws SQLException {
         synchronized (db) {
-            String sql = "DELETE FROM accounts WHERE id=?";
-            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
-                ps.setLong(1, id);
-                ps.executeUpdate();
+            // foreign_keys=ON means an account that is still referenced (it owns
+            // test cases, or has baselines / runs / results) cannot be deleted
+            // directly — that was why "certain accounts" refused to delete. Null
+            // out every reference first, in one transaction, then remove the row.
+            Connection conn = db.getConnection();
+            boolean prev = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                String[] clears = {
+                    "UPDATE test_cases SET owner_acct_id = NULL WHERE owner_acct_id = ?",
+                    "UPDATE baselines  SET account_id    = NULL WHERE account_id    = ?",
+                    "UPDATE runs       SET account_id    = NULL WHERE account_id    = ?",
+                    "UPDATE results    SET account_id    = NULL WHERE account_id    = ?"
+                };
+                for (String sql : clears) {
+                    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                        ps.setLong(1, id); ps.executeUpdate();
+                    }
+                }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM accounts WHERE id=?")) {
+                    ps.setLong(1, id); ps.executeUpdate();
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback(); throw e;
+            } finally {
+                conn.setAutoCommit(prev);
             }
         }
     }

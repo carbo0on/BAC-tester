@@ -134,6 +134,71 @@ public class FolderRepository {
         }
     }
 
+    /**
+     * Deletes a folder <em>and all its sub-folders</em>, moving every test case
+     * found anywhere in that subtree back to the Inbox (folder_id = NULL).
+     *
+     * <p>The plain {@link #deleteFolder(long)} fails with a foreign-key error when
+     * the folder still has children (the AI organizer routinely nests folders),
+     * which is why deleting such folders appeared "impossible". This walks the
+     * whole subtree and removes it bottom-up inside one transaction so the
+     * parent_id self-reference is never left dangling. Returns the ids that were
+     * deleted (subtree root first) so callers can update their selection state.
+     */
+    public List<Long> deleteFolderCascade(long rootId) throws SQLException {
+        synchronized (db) {
+            // 1. Collect the subtree (root + all descendants) breadth-first.
+            List<FolderRecord> all = getAllFolders();
+            Map<Long, List<Long>> childrenOf = new HashMap<>();
+            for (FolderRecord f : all) {
+                if (f.parentId() != null)
+                    childrenOf.computeIfAbsent(f.parentId(), k -> new ArrayList<>()).add(f.id());
+            }
+            List<Long> ordered = new ArrayList<>();   // shallow → deep
+            Deque<Long> queue = new ArrayDeque<>();
+            queue.add(rootId);
+            while (!queue.isEmpty()) {
+                Long cur = queue.poll();
+                ordered.add(cur);
+                List<Long> kids = childrenOf.get(cur);
+                if (kids != null) queue.addAll(kids);
+            }
+
+            Connection conn = db.getConnection();
+            boolean prev = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                // 2. Move every test case in the subtree to the Inbox.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE test_cases SET folder_id = NULL WHERE folder_id = ?")) {
+                    for (Long fid : ordered) { ps.setLong(1, fid); ps.addBatch(); }
+                    ps.executeBatch();
+                }
+                // 3. Delete deepest-first so no row's parent is removed before it.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM folders WHERE id = ?")) {
+                    for (int i = ordered.size() - 1; i >= 0; i--) {
+                        ps.setLong(1, ordered.get(i)); ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                // 4. Drop any AI cache rows that pointed at the removed folders so
+                //    future captures get re-classified instead of resurrecting them.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM ai_endpoint_cache WHERE folder_id = ?")) {
+                    for (Long fid : ordered) { ps.setLong(1, fid); ps.addBatch(); }
+                    ps.executeBatch();
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback(); throw e;
+            } finally {
+                conn.setAutoCommit(prev);
+            }
+            return ordered;
+        }
+    }
+
     public int countInFolder(long folderId) throws SQLException {
         synchronized (db) {
             String sql = "SELECT COUNT(*) FROM test_cases WHERE folder_id = ?";

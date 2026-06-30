@@ -68,6 +68,53 @@ public class FolderRepository {
         }
     }
 
+    /**
+     * Like {@link #findOrCreatePath(String)} but matches each segment against
+     * existing sibling folders <em>canonically</em> (case-, space- and
+     * plural-insensitive) before creating a new one. This stops the AI organizer
+     * from spawning near-duplicate folders like "Users" / "User" / "user
+     * management" that fragment the tree. New folders keep the supplied casing.
+     */
+    public Long findOrCreatePathCanonical(String path) throws SQLException {
+        if (path == null) return null;
+        List<String> segments = new ArrayList<>();
+        for (String seg : path.split("/")) {
+            String s = seg.trim();
+            if (!s.isEmpty()) segments.add(s);
+        }
+        if (segments.isEmpty()) return null;
+
+        synchronized (db) {
+            List<FolderRecord> all = getAllFolders();
+            Long parentId = null;
+            for (String name : segments) {
+                String norm = canonical(name);
+                Long match = null;
+                for (FolderRecord fr : all) {
+                    if (Objects.equals(fr.parentId(), parentId) && canonical(fr.name()).equals(norm)) {
+                        match = fr.id();
+                        break;
+                    }
+                }
+                if (match == null) {
+                    long created = createFolder(name, parentId);
+                    all.add(new FolderRecord(created, name, parentId, 0, null));
+                    match = created;
+                }
+                parentId = match;
+            }
+            return parentId;
+        }
+    }
+
+    /** Normalized folder-name key: lowercase, alphanumerics only, naive singular. */
+    public static String canonical(String s) {
+        if (s == null) return "";
+        String x = s.toLowerCase().replaceAll("[^a-z0-9]", "");
+        if (x.length() > 3 && x.endsWith("s") && !x.endsWith("ss")) x = x.substring(0, x.length() - 1);
+        return x;
+    }
+
     public List<FolderRecord> getAllFolders() throws SQLException {
         synchronized (db) {
             String sql = "SELECT id, name, parent_id, sort_order, color FROM folders ORDER BY sort_order, name";

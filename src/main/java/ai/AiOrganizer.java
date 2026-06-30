@@ -48,7 +48,6 @@ public class AiOrganizer {
     private static final Pattern UUID = Pattern.compile(
             "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     private static final Pattern DIGITS = Pattern.compile("\\d+");
-    private static final int MAX_FOLDER_DEPTH = 3;
 
     public AiOrganizer(MontoyaApi api, DatabaseManager db, TestCaseRepository tcRepo,
                        FolderRepository folderRepo, AiCacheRepository cacheRepo,
@@ -138,39 +137,58 @@ public class AiOrganizer {
     // ---- Core ------------------------------------------------------------
 
     private void organizeOne(AiConfig cfg, TestCaseRow row, boolean overrideFolder) throws Exception {
-        String signature = signature(row.method(), row.host(), row.url());
+        String signature  = signature(row.method(), row.host(), row.url());
+        String featureKey = featureKey(row.host(), row.url());
 
-        // 1. Cache hit → group with the prior decision, no API call.
-        CacheEntry hit = cacheRepo.lookup(signature).orElse(null);
-        if (hit != null) {
-            Long folderId = folderRepo.findOrCreatePath(hit.folderPath());
-            apply(row.id(), hit.name(), hit.description(), folderId);
+        // 1. Exact endpoint already classified → reuse name+desc+folder, no API.
+        CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
+        if (exact != null) {
+            Long folderId = folderRepo.findOrCreatePathCanonical(exact.folderPath());
+            apply(row.id(), exact.name(), exact.description(), folderId);
+            // Refresh the folder id in case the folder had been deleted/recreated.
+            cacheRepo.put(signature, featureKey, folderId, exact.folderPath(),
+                    exact.name(), exact.description());
             api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
-                    + hit.folderPath() + " (cached, no API call).");
-            status("AI ✓ grouped → " + hit.folderPath() + " (cached)");
+                    + exact.folderPath() + " (cached, no API call).");
+            status("AI ✓ grouped → " + exact.folderPath() + " (cached)");
             return;
         }
 
-        // 2. Miss → ask the model.
+        // 2. A sibling endpoint of the same feature was classified before → pin its
+        //    TOP-level function folder so this request lands in the same place.
+        //    This is what stops "a new folder per request": everything under the
+        //    same base path (e.g. /api/users/*) shares one function folder.
+        CacheEntry feature = cacheRepo.lookupByFeatureKey(featureKey).orElse(null);
+        String pinnedTop = feature != null ? topSegment(feature.folderPath()) : null;
+
+        // 3. Ask the model for a concise name + description (and a sub-folder when
+        //    the top folder is pinned, otherwise the full ≤2-level function path).
         String reqText  = decode(tcRepo.getRequestRaw(row.id()));
         String respText = decode(tcRepo.getPrimaryBaselineResponse(row.id()));
         List<String> existingFolders = existingFolderPaths();
 
         String system = """
-            You are a security testing assistant that organizes captured HTTP requests.
-            Given one request and its response, classify it by the application FUNCTION it
-            belongs to (e.g. Authentication, User Profile, Admin, Payments, Cart, Search).
-            Reply with ONLY a JSON object, no markdown, with exactly these keys:
-              "name": a very short, human-readable name for this specific request (max 6 words),
-              "description": a very short description of what the request does and its purpose (max 14 words),
-              "folder": a "/"-separated function folder path, at most 3 levels deep
-                        (e.g. "Authentication/Login" or "Admin/Users").
-            Reuse an existing folder path from the provided list whenever the request fits it,
-            so related requests are grouped together. Keep names concise and consistent.""";
+            You organize captured HTTP requests for a security tester into a tidy,
+            REUSABLE folder tree. Group requests by the application FUNCTION they serve
+            (e.g. Authentication, Users, Profile, Admin, Payments, Cart, Search) — NEVER
+            by host, domain, URL or path. Folders must be at most 2 levels deep
+            (Function/Sub-function, e.g. "Users/Profile" or "Admin/Roles").
+            Strongly prefer an existing folder from the provided list; only invent a new
+            one when nothing fits. Keep names short and consistent so similar requests
+            collapse together instead of each getting its own folder.
+            Reply with ONLY a JSON object (no markdown), with exactly these keys:
+              "name": a very short human-readable name for THIS request (max 6 words),
+              "description": what the request does and its purpose (max 14 words),
+              "folder": the chosen "/"-separated function folder path (max 2 levels).""";
 
         StringBuilder user = new StringBuilder();
-        user.append("Endpoint: ").append(row.method()).append(' ').append(row.url()).append('\n');
-        user.append("Host: ").append(row.host()).append('\n');
+        user.append("Endpoint: ").append(row.method()).append(' ')
+            .append(pathOnly(row.url())).append('\n');
+        if (pinnedTop != null) {
+            user.append("This request belongs to the existing function \"").append(pinnedTop)
+                .append("\". Use \"").append(pinnedTop)
+                .append("\" as the first folder level (optionally add ONE sub-folder under it).\n");
+        }
         if (!existingFolders.isEmpty()) {
             user.append("Existing folders (reuse when appropriate):\n");
             for (String f : existingFolders) user.append("  - ").append(f).append('\n');
@@ -189,15 +207,15 @@ public class AiOrganizer {
             return;
         }
 
-        String folderPath = sanitizeFolderPath(p.folder, row.url());
+        String folderPath = sanitizeFolderPath(p.folder, row.url(), row.host(), pinnedTop);
         String name = sanitizeName(p.name);
         String desc = sanitizeDescription(p.description);
 
-        Long folderId = folderRepo.findOrCreatePath(folderPath);
+        Long folderId = folderRepo.findOrCreatePathCanonical(folderPath);
         apply(row.id(), name, desc, folderId);
-        cacheRepo.put(signature, folderId, folderPath, name, desc);
+        cacheRepo.put(signature, featureKey, folderId, folderPath, name, desc);
         api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
-                + " as \"" + name + "\".");
+                + " as \"" + name + "\"" + (pinnedTop != null ? " (grouped under " + pinnedTop + ")" : "") + ".");
         status("AI ✓ " + name + " → " + folderPath);
     }
 
@@ -236,6 +254,63 @@ public class AiOrganizer {
         String templated = sb.length() == 0 ? "/" : sb.toString();
         return (method == null ? "" : method.toUpperCase()) + " "
                 + (host == null ? "" : host.toLowerCase()) + " " + templated;
+    }
+
+    /** Generic API/versioning path prefixes that carry no functional meaning. */
+    private static final Set<String> GENERIC_SEGMENTS = Set.of(
+            "api", "rest", "graphql", "gql", "public", "internal", "external",
+            "www", "app", "apps", "web", "services", "service", "ajax", "json", "rpc");
+
+    private static boolean isVersionSegment(String s) {
+        return s.matches("v\\d+") || s.matches("\\d+\\.\\d+");
+    }
+
+    /**
+     * Coarse feature key: host + the first <em>meaningful</em> path segment
+     * (skipping generic prefixes like "api"/"v1" and id-like segments). All
+     * endpoints under the same base area (e.g. every /api/users/* call) share
+     * this key, so they reuse one function folder with no extra API calls.
+     */
+    static String featureKey(String host, String url) {
+        String path;
+        try {
+            path = new URI(url).getPath();
+        } catch (Exception e) {
+            int slash = url.indexOf('/', url.indexOf("//") + 2);
+            path = slash >= 0 ? url.substring(slash) : "/";
+        }
+        if (path == null) path = "/";
+        String feature = null;
+        for (String seg : path.split("/")) {
+            if (seg.isEmpty()) continue;
+            String low = seg.toLowerCase();
+            if (GENERIC_SEGMENTS.contains(low) || isVersionSegment(low) || isIdLike(seg)) continue;
+            feature = low;
+            break;
+        }
+        String h = host == null ? "" : host.toLowerCase();
+        return h + "|" + (feature != null ? feature : "/");
+    }
+
+    /** First "/"-separated segment of a folder path, or null. */
+    private static String topSegment(String folderPath) {
+        if (folderPath == null) return null;
+        for (String seg : folderPath.split("/")) {
+            String s = seg.trim();
+            if (!s.isEmpty()) return s;
+        }
+        return null;
+    }
+
+    /** Path (+ query) of a URL, without scheme/host — keeps the prompt host-free. */
+    private static String pathOnly(String url) {
+        try {
+            URI u = new URI(url);
+            String p = u.getPath() == null || u.getPath().isEmpty() ? "/" : u.getPath();
+            return u.getQuery() != null ? p + "?" + u.getQuery() : p;
+        } catch (Exception e) {
+            return url;
+        }
     }
 
     private static boolean isIdLike(String seg) {
@@ -358,16 +433,34 @@ public class AiOrganizer {
         return s.isEmpty() ? null : s;
     }
 
-    /** Cleans the model's folder path; falls back to the first URL path segment. */
-    private static String sanitizeFolderPath(String folder, String url) {
+    /**
+     * Cleans the model's folder path into a tidy ≤2-level function path:
+     * drops id-like / host- / domain-like segments (so we never get a folder
+     * named after the site), pins the top folder when grouping by feature, and
+     * falls back to the first meaningful URL path segment.
+     */
+    private static String sanitizeFolderPath(String folder, String url, String host, String pinnedTop) {
+        String hostNorm = host == null ? "" : host.toLowerCase();
         List<String> out = new ArrayList<>();
         if (folder != null) {
             for (String seg : folder.split("/")) {
                 String s = seg.replaceAll("[\\\\:*?\"<>|]", " ").replaceAll("\\s+", " ").trim();
                 if (s.isEmpty() || isIdLike(s)) continue;
+                // Never let the model use the host/domain (or a domain-like token).
+                String low = s.toLowerCase();
+                if (low.equals(hostNorm) || hostNorm.startsWith(low + ".")
+                        || low.contains(".") || GENERIC_SEGMENTS.contains(low) || isVersionSegment(low)) continue;
                 if (s.length() > 40) s = s.substring(0, 40).trim();
                 out.add(s);
-                if (out.size() >= MAX_FOLDER_DEPTH) break;
+                if (out.size() >= 2) break;   // max 2 levels (Function/Sub-function)
+            }
+        }
+        // Force the pinned top folder so siblings of the same feature stay together.
+        if (pinnedTop != null && !pinnedTop.isBlank()) {
+            String topNorm = FolderRepository.canonical(pinnedTop);
+            if (out.isEmpty() || !FolderRepository.canonical(out.get(0)).equals(topNorm)) {
+                out.add(0, pinnedTop);
+                if (out.size() > 2) out = new ArrayList<>(out.subList(0, 2));
             }
         }
         if (out.isEmpty()) {
@@ -376,10 +469,11 @@ public class AiOrganizer {
                 String path = new URI(url).getPath();
                 if (path != null) {
                     for (String seg : path.split("/")) {
-                        if (!seg.isEmpty() && !isIdLike(seg)) {
-                            String s = seg.replaceAll("[^A-Za-z0-9 _-]", "").trim();
-                            if (!s.isEmpty()) { out.add(capitalize(s)); break; }
-                        }
+                        if (seg.isEmpty() || isIdLike(seg)) continue;
+                        String low = seg.toLowerCase();
+                        if (GENERIC_SEGMENTS.contains(low) || isVersionSegment(low)) continue;
+                        String s = seg.replaceAll("[^A-Za-z0-9 _-]", "").trim();
+                        if (!s.isEmpty()) { out.add(capitalize(s)); break; }
                     }
                 }
             } catch (Exception ignored) {}

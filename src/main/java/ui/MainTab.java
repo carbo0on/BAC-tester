@@ -30,6 +30,7 @@ public class MainTab {
     private final CompareTab compareTab;
     private final LiveTab liveTab;
     private final DashboardTab dashboardTab;
+    private final AiOrganizer aiOrganizer;
 
     // Sub-tab indices
     private static final int TAB_LIBRARY   = 0;
@@ -55,7 +56,7 @@ public class MainTab {
         // function folder. Wired here so both capture (auto) and the Library
         // context menu (manual) can drive it. No-op until enabled in Settings.
         AiCacheRepository aiCache = new AiCacheRepository(db);
-        AiOrganizer aiOrganizer = new AiOrganizer(api, db, tcRepo, folderRepo, aiCache,
+        aiOrganizer = new AiOrganizer(api, db, tcRepo, folderRepo, aiCache,
             () -> SwingUtilities.invokeLater(libraryTab::refresh));
         captureService.setAiOrganizer(aiOrganizer);
         libraryTab.setAiOrganizer(aiOrganizer);
@@ -229,6 +230,11 @@ public class MainTab {
 
     public String caption()        { return "BAC Time-Machine"; }
     public Component uiComponent() { return root; }
+
+    /** Releases background workers owned by the UI; call on extension unload. */
+    public void shutdown() {
+        if (aiOrganizer != null) aiOrganizer.shutdown();
+    }
 
     /** The Live tab — Extension routes Proxy traffic here for auto-replay. */
     public LiveTab liveTab() { return liveTab; }

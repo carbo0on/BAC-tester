@@ -65,12 +65,6 @@ public class Extension implements BurpExtension {
             return;
         }
 
-        // --- 3. Unloading handler ----------------------------------------
-        api.extension().registerUnloadingHandler(() -> {
-            dbManager.close();
-            logging.logToOutput("[BAC] Extension unloaded.");
-        });
-
         // --- 4. Repositories + tab ---------------------------------------
         AccountRepository  accountRepo = new AccountRepository(dbManager);
         TestCaseRepository tcRepo      = new TestCaseRepository(dbManager);
@@ -78,6 +72,15 @@ public class Extension implements BurpExtension {
 
         mainTab = new MainTab(api, dbManager, capture, accountRepo);
         api.userInterface().registerSuiteTab(mainTab.caption(), mainTab.uiComponent());
+
+        // --- 3. Unloading handler ----------------------------------------
+        // Registered after capture/mainTab exist so their workers can be stopped.
+        api.extension().registerUnloadingHandler(() -> {
+            capture.shutdown();
+            if (mainTab != null) mainTab.shutdown();
+            dbManager.close();
+            logging.logToOutput("[BAC] Extension unloaded.");
+        });
 
         // --- 5. Context menu ---------------------------------------------
         api.userInterface().registerContextMenuItemsProvider(

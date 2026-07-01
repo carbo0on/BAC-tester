@@ -98,8 +98,19 @@ public class AiClient {
         if (candidates == null || candidates.isEmpty()) {
             throw new AiException("Gemini: empty response");
         }
-        JsonObject content = candidates.get(0).getAsJsonObject().getAsJsonObject("content");
+        JsonObject cand0 = candidates.get(0).getAsJsonObject();
+        JsonObject content = cand0.getAsJsonObject("content");
+        if (content == null) {
+            // A blocked or truncated candidate can carry a finishReason but no
+            // content/parts — surface it instead of NPE'ing.
+            String reason = cand0.has("finishReason") && !cand0.get("finishReason").isJsonNull()
+                    ? cand0.get("finishReason").getAsString() : "unknown";
+            throw new AiException("Gemini: no content (finishReason=" + reason + ")");
+        }
         JsonArray rParts = content.getAsJsonArray("parts");
+        if (rParts == null || rParts.isEmpty()) {
+            throw new AiException("Gemini: empty content parts");
+        }
         StringBuilder sb = new StringBuilder();
         for (JsonElement el : rParts) {
             JsonElement t = el.getAsJsonObject().get("text");

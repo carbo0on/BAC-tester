@@ -74,6 +74,11 @@ public class AiOrganizer {
         if (l != null) l.accept(msg);
     }
 
+    /** Stops the background worker; call on extension unload to avoid thread leaks. */
+    public void shutdown() {
+        worker.shutdownNow();
+    }
+
     // ---- Entry points ----------------------------------------------------
 
     /**
@@ -88,7 +93,7 @@ public class AiOrganizer {
             try {
                 TestCaseRow row = tcRepo.getById(tcId).orElse(null);
                 if (row == null || row.folderId() != null) return; // already filed
-                organizeOne(cfg, row, false);
+                organizeOne(cfg, row);
                 if (onChanged != null) onChanged.run();
             } catch (Exception e) {
                 String m = e.getMessage();
@@ -115,7 +120,7 @@ public class AiOrganizer {
                 try {
                     TestCaseRow row = tcRepo.getById(id).orElse(null);
                     if (row == null) { fail++; continue; }
-                    organizeOne(cfg, row, true);
+                    organizeOne(cfg, row);
                     ok++;
                     if (onChanged != null) onChanged.run();
                 } catch (Exception e) {
@@ -135,9 +140,8 @@ public class AiOrganizer {
 
     // ---- Core ------------------------------------------------------------
 
-    private void organizeOne(AiConfig cfg, TestCaseRow row, boolean overrideFolder) throws Exception {
-        String signature  = signature(row.method(), row.host(), row.url());
-        String featureKey = featureKey(row.host(), row.url());
+    private void organizeOne(AiConfig cfg, TestCaseRow row) throws Exception {
+        String signature = signature(row.method(), row.host(), row.url());
 
         // ── Folder = the URL path itself (deterministic). ──────────────────
         // Folders mirror the request's URL path segments (ids dropped); the same
@@ -150,16 +154,14 @@ public class AiOrganizer {
 
         // ── Name + description. ────────────────────────────────────────────
         // Reuse a cached name/description for this exact endpoint (no API call).
-        // Otherwise ask the model once (when configured); if that fails or AI is
-        // off, fall back to a readable name derived from the URL so the request
-        // is still placed and named.
+        // The cache only ever holds AI-produced names (see below), so a hit here
+        // means this endpoint was genuinely classified once already.
         CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
-        String name, desc;
         if (exact != null && exact.name() != null && !exact.name().isBlank()) {
-            name = exact.name();
-            desc = exact.description();
+            String name = exact.name();
+            String desc = exact.description();
             apply(row.id(), name, desc, folderId);
-            cacheRepo.put(signature, featureKey, folderId,
+            cacheRepo.put(signature, folderId,
                     folderPath != null ? folderPath : "", name, desc);
             api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
                     + folderPath + " (cached name, no API call).");
@@ -167,6 +169,11 @@ public class AiOrganizer {
             return;
         }
 
+        // Otherwise ask the model once (when configured). On any failure we fall
+        // back to a readable URL-derived name so the request is still placed —
+        // but we DON'T cache that fallback, so a transient AI error (offline /
+        // rate-limit / blocked reply) is retried on the next capture instead of
+        // permanently pinning this endpoint to a non-AI name.
         Parsed p = null;
         if (cfg.isConfigured()) {
             try {
@@ -176,20 +183,22 @@ public class AiOrganizer {
                         + " (filed by URL anyway): " + e.getMessage());
             }
         }
-        if (p != null && p.name() != null && !p.name().isBlank()) {
-            name = sanitizeName(p.name());
-            desc = sanitizeDescription(p.description());
+        String aiName = p != null ? sanitizeName(p.name()) : null;
+        if (aiName != null && !aiName.isBlank()) {
+            String desc = sanitizeDescription(p.description());
+            apply(row.id(), aiName, desc, folderId);
+            cacheRepo.put(signature, folderId,
+                    folderPath != null ? folderPath : "", aiName, desc);
+            api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
+                    + " as \"" + aiName + "\".");
+            status("AI ✓ " + aiName + " → " + folderPath);
         } else {
-            name = fallbackName(row);
-            desc = null;
+            String name = fallbackName(row);
+            apply(row.id(), name, null, folderId);
+            api.logging().logToOutput("[BAC][AI] Filed #" + row.id() + " → " + folderPath
+                    + " as \"" + name + "\" (no AI name; will retry next time).");
+            status("AI ⚠ filed → " + folderPath + " (no AI name)");
         }
-
-        apply(row.id(), name, desc, folderId);
-        cacheRepo.put(signature, featureKey, folderId,
-                folderPath != null ? folderPath : "", name, desc);
-        api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
-                + " as \"" + name + "\".");
-        status("AI ✓ " + name + " → " + folderPath);
     }
 
     /** Asks the model for a concise name + description only (folder is URL-derived). */
@@ -272,42 +281,6 @@ public class AiOrganizer {
         String templated = sb.length() == 0 ? "/" : sb.toString();
         return (method == null ? "" : method.toUpperCase()) + " "
                 + (host == null ? "" : host.toLowerCase()) + " " + templated;
-    }
-
-    /** Generic API/versioning path prefixes that carry no functional meaning. */
-    private static final Set<String> GENERIC_SEGMENTS = Set.of(
-            "api", "rest", "graphql", "gql", "public", "internal", "external",
-            "www", "app", "apps", "web", "services", "service", "ajax", "json", "rpc");
-
-    private static boolean isVersionSegment(String s) {
-        return s.matches("v\\d+") || s.matches("\\d+\\.\\d+");
-    }
-
-    /**
-     * Coarse feature key: host + the first <em>meaningful</em> path segment
-     * (skipping generic prefixes like "api"/"v1" and id-like segments). All
-     * endpoints under the same base area (e.g. every /api/users/* call) share
-     * this key, so they reuse one function folder with no extra API calls.
-     */
-    static String featureKey(String host, String url) {
-        String path;
-        try {
-            path = new URI(url).getPath();
-        } catch (Exception e) {
-            int slash = url.indexOf('/', url.indexOf("//") + 2);
-            path = slash >= 0 ? url.substring(slash) : "/";
-        }
-        if (path == null) path = "/";
-        String feature = null;
-        for (String seg : path.split("/")) {
-            if (seg.isEmpty()) continue;
-            String low = seg.toLowerCase();
-            if (GENERIC_SEGMENTS.contains(low) || isVersionSegment(low) || isIdLike(seg)) continue;
-            feature = low;
-            break;
-        }
-        String h = host == null ? "" : host.toLowerCase();
-        return h + "|" + (feature != null ? feature : "/");
     }
 
     /**

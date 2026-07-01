@@ -47,6 +47,11 @@ public class CaptureService {
         this.aiOrganizer = organizer;
     }
 
+    /** Stops the background worker; call on extension unload to avoid thread leaks. */
+    public void shutdown() {
+        executor.shutdownNow();
+    }
+
     /** Quick-save a single request to Inbox with no metadata dialog. */
     public void quickSaveToInbox(HttpRequestResponse reqResp) {
         if (reqResp == null || reqResp.request() == null) {

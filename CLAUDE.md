@@ -96,23 +96,24 @@ Recent additions:
   **zero** API calls, and a truncation budget (`ai_max_chars`). Keys live only in the local SQLite
   settings; calls go out via the JDK HttpClient (not Burp). Settings tab → *AI Organization* (enable,
   provider, key, model, budget, **group by host**, Test connection, **Reset AI grouping**).
-  - **Functional taxonomy (model-decided, shallow):** the folder is `[host]/Category[/Resource]` — the
-    model picks the `Category` from a **fixed list** (`AiOrganizer.CATEGORIES`: Authentication, Users &
-    Profiles, Admin, Billing & Payments, …, Misc) plus an optional 1–2 word `Resource` sub-folder, so
-    the tree stays **shallow (≤ 2 functional levels) and consistent** instead of mirroring the raw URL.
-    `AiOrganizer.normalizeCategory` snaps free-text replies onto the fixed list (else *Misc*). The host
-    prefix is toggled by the `ai_folder_by_host` setting (on by default). `FolderRepository.findOrCreate-
-    PathCanonical` **reuses an existing folder** (case/space/plural-insensitive via `canonical`) instead
-    of spawning a new one per request.
+  - **Functional taxonomy grouped by function:** the folder is `[host]/Category/Feature` where the model
+    picks `Category` from a **fixed list** (`AiOrganizer.CATEGORIES`: Authentication, Users & Profiles,
+    Admin, Billing & Payments, …, Misc) and `Feature` is the **deterministic first meaningful path
+    segment** (`AiOrganizer.featureSegment` — generic `api`/`v1` prefixes and ids dropped). The category
+    is decided **once per function and reused** via a **feature-key cache** (`ai_endpoint_cache.feature_
+    key`, host + first segment): every endpoint of one function (all of `/orders/*`) reuses the same
+    folder with **zero** extra API calls — so there's **no per-endpoint fragmentation**. `normalizeCategory`
+    snaps free-text replies onto the fixed list (else *Misc*); the host prefix is toggled by
+    `ai_folder_by_host` (on by default); `FolderRepository.findOrCreatePathCanonical` reuses existing
+    folders (case/space/plural-insensitive via `canonical`).
+  - **API budget:** ~**one call per function**, not per endpoint — the *first* endpoint of a function is
+    classified by the model; later siblings reuse its folder (step 2 in `organizeOne`) with a
+    deterministic `METHOD — last-segment` name and no call; an exact repeat of one endpoint reuses its
+    cached name/folder (step 1).
   - **Fallback when AI is unavailable:** the request is filed under a cleaned, shallow URL-derived path
-    (`AiOrganizer.fallbackFolderPath` / `meaningfulSegments` — generic `api`/`v1` prefixes and ids
-    dropped, depth ≤ 2). This fallback is **never cached**, so a transient AI error (offline / rate-limit
-    / blocked reply) is **retried** on the next capture instead of permanently pinning the endpoint.
-  - **Naming:** the model returns a verb+object action name; it's stored as `METHOD — action`
-    (`AiOrganizer.nameWithMethod`). Each exact endpoint signature is classified at most once (cached in
-    `ai_endpoint_cache` — only AI-produced results are cached); repeats reuse the cached name/folder with
-    **zero** API calls, and the AI-off fallback is `METHOD — last-segment`. *Reset AI grouping* clears
-    the cache.
+    (`AiOrganizer.fallbackFolderPath` / `meaningfulSegments`, depth ≤ 2). This fallback is **never
+    cached**, so a transient AI error (offline / rate-limit / blocked reply) is **retried** on the next
+    capture instead of permanently pinning the endpoint. *Reset AI grouping* clears the cache.
   - **Library findability:** rows sort by host → url → method (same resource's verbs cluster); a
     **"Group duplicates"** toggle collapses repeated captures of one endpoint into a single ×N row.
 

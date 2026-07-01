@@ -19,12 +19,13 @@ import java.util.regex.Pattern;
 
 /**
  * Reads a captured request/response with an LLM and files it into a tidy,
- * consistent library: the model classifies the endpoint into ONE of a small
- * fixed functional taxonomy (see {@link #CATEGORIES}) plus an optional resource
- * sub-folder, and returns a short action name + one-line description. Folders
- * are therefore shallow ({@code [host]/Category[/Resource]}) and stable rather
- * than mirroring the raw URL. Similar endpoints are grouped via a signature
- * cache so a given endpoint is classified at most once — keeping API usage low.
+ * consistent library. Folders are {@code [host]/Category/Feature} where the
+ * model picks {@code Category} from a small fixed taxonomy (see {@link #CATEGORIES})
+ * and {@code Feature} is the deterministic first meaningful path segment. The
+ * category is decided ONCE per function and reused (feature-key cache), so every
+ * endpoint of one function (e.g. all of {@code /orders/*}) lands in the SAME
+ * folder — one API call per function, not per endpoint, and no fragmentation.
+ * An exact-endpoint cache means a repeated request costs nothing.
  *
  * <p>When AI is unavailable the request is still filed under a cleaned,
  * URL-derived fallback folder (that fallback is never cached, so it is retried
@@ -167,30 +168,43 @@ public class AiOrganizer {
     // ---- Core ------------------------------------------------------------
 
     private void organizeOne(AiConfig cfg, TestCaseRow row) throws Exception {
-        String signature = signature(row.method(), row.host(), row.url());
+        String signature  = signature(row.method(), row.host(), row.url());
+        String featureKey = featureKey(row.host(), row.url());
 
-        // ── Reuse a cached classification for this exact endpoint (no API call).
-        // The cache only ever holds AI-produced results, so a hit means this
-        // endpoint was genuinely classified once already. We reuse the cached
-        // functional folder path too, so grouping stays stable.
+        // 1) Exact endpoint already classified → reuse its folder + name + notes
+        //    with NO API call. (Repeats of the same request cost nothing.)
         CacheEntry exact = cacheRepo.lookup(signature).orElse(null);
         if (exact != null && exact.name() != null && !exact.name().isBlank()) {
-            String path = exact.folderPath();
-            Long folderId = (path == null || path.isBlank()) ? null
-                    : folderRepo.findOrCreatePathCanonical(path);
+            Long folderId = pathToFolder(exact.folderPath());
             apply(row.id(), exact.name(), exact.description(), folderId);
             api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → "
-                    + path + " (cached, no API call).");
-            status("AI ✓ grouped → " + path + " (cached)");
+                    + exact.folderPath() + " (cached endpoint, no API call).");
+            status("AI ✓ grouped → " + exact.folderPath() + " (cached)");
             return;
         }
 
-        // ── Ask the model once (when configured) for a functional category +
-        // resource + action name. On any failure we fall back to a cleaned,
-        // URL-derived folder + name so the request is still placed — but we
-        // DON'T cache that fallback, so a transient AI error (offline / rate-
-        // limit / blocked reply) is retried on the next capture instead of
-        // permanently pinning this endpoint to a non-AI classification.
+        // 2) A DIFFERENT endpoint of the SAME function was already classified →
+        //    reuse its folder (same Category + Feature) with NO API call, so all
+        //    of e.g. /orders, /orders/{id}, /orders/{id}/cancel land together.
+        CacheEntry feat = cacheRepo.lookupByFeatureKey(featureKey).orElse(null);
+        if (feat != null && feat.folderPath() != null && !feat.folderPath().isBlank()) {
+            String folderPath = feat.folderPath();
+            Long folderId = pathToFolder(folderPath);
+            String name = fallbackName(row);   // deterministic; grouping is the priority
+            apply(row.id(), name, null, folderId);
+            cacheRepo.put(signature, featureKey, folderId, folderPath, name, null);
+            api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → " + folderPath
+                    + " (same function, no API call).");
+            status("AI ✓ grouped → " + folderPath + " (function)");
+            return;
+        }
+
+        // 3) First endpoint of a NEW function → ask the model once for the
+        //    functional category (+ a name). Build a stable, shallow folder
+        //    [host]/Category/Feature where Feature is the deterministic first
+        //    meaningful path segment, so later siblings reuse it via step 2.
+        //    On failure we file under a cleaned URL fallback and DON'T cache it,
+        //    so the classification is retried once AI is reachable again.
         Parsed p = null;
         if (cfg.isConfigured()) {
             try {
@@ -201,23 +215,23 @@ public class AiOrganizer {
             }
         }
 
-        String aiName = p != null ? sanitizeName(p.name()) : null;
-        if (aiName != null && !aiName.isBlank()) {
-            // Functional folder: [host]/Category[/Resource] — max two functional levels.
+        if (p != null && p.category() != null && !p.category().isBlank()) {
             String category = normalizeCategory(p.category());
-            String resource = sanitizeSegment(p.resource());
+            String feature  = featureSegment(row.url());
             List<String> parts = new ArrayList<>();
             if (cfg.folderByHost()) { String h = hostSegment(row.host()); if (h != null) parts.add(h); }
             parts.add(category);
-            if (resource != null) parts.add(resource);
+            if (feature != null) parts.add(feature);
             String folderPath = String.join("/", parts);
             Long folderId = folderRepo.findOrCreatePathCanonical(folderPath);
 
-            String name = nameWithMethod(row.method(), aiName);
+            String aiName = sanitizeName(p.name());
+            String name = (aiName != null && !aiName.isBlank())
+                    ? nameWithMethod(row.method(), aiName) : fallbackName(row);
             String desc = sanitizeDescription(p.description());
             apply(row.id(), name, desc, folderId);
-            cacheRepo.put(signature, folderId, folderPath, name, desc);
-            api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
+            cacheRepo.put(signature, featureKey, folderId, folderPath, name, desc);
+            api.logging().logToOutput("[BAC][AI] Classified #" + row.id() + " → " + folderPath
                     + " as \"" + name + "\".");
             status("AI ✓ " + name + " → " + folderPath);
         } else {
@@ -232,7 +246,12 @@ public class AiOrganizer {
         }
     }
 
-    /** Asks the model for a functional category + resource + action name + description. */
+    /** Resolves a folder path to an id (creating as needed); null/blank → Inbox. */
+    private Long pathToFolder(String path) throws java.sql.SQLException {
+        return (path == null || path.isBlank()) ? null : folderRepo.findOrCreatePathCanonical(path);
+    }
+
+    /** Asks the model for a functional category + action name + description. */
     private Parsed describe(AiConfig cfg, TestCaseRow row) throws Exception {
         String reqText  = decode(tcRepo.getRequestRaw(row.id()));
         String respText = decode(tcRepo.getPrimaryBaselineResponse(row.id()));
@@ -242,13 +261,11 @@ public class AiOrganizer {
             filed into a tidy, consistent library. Reply with ONLY a JSON object (no
             markdown), with exactly these keys:
               "category": pick EXACTLY ONE of: %s,
-              "resource": a 1-2 word noun for the specific object/area (e.g. "Profile",
-                          "Orders", "Invoices"); use "" if none applies,
               "name": a very short ACTION name for THIS request as verb + object
                       (max 5 words, DO NOT include the HTTP method),
               "description": what the request does and its purpose (max 14 words).
-            Be concise and consistent: reuse the SAME category and resource wording for
-            related endpoints so they group together.""".formatted(String.join(", ", CATEGORIES));
+            Be concise and consistent: pick the category by the request's business
+            FUNCTION so related endpoints share it.""".formatted(String.join(", ", CATEGORIES));
 
         StringBuilder user = new StringBuilder();
         user.append("Endpoint: ").append(row.method()).append(' ')
@@ -306,6 +323,24 @@ public class AiOrganizer {
         List<String> segs = meaningfulSegments(row.url(), Integer.MAX_VALUE);
         String last = segs.isEmpty() ? null : segs.get(segs.size() - 1);
         return nameWithMethod(row.method(), last);
+    }
+
+    /**
+     * Coarse function key: host + the first meaningful path segment. Every
+     * endpoint under the same base area (e.g. all of {@code /orders/*}) shares
+     * this key, so they reuse one folder + the category already chosen for that
+     * function — no extra API calls and no per-endpoint fragmentation.
+     */
+    static String featureKey(String host, String url) {
+        String seg = featureSegment(url);
+        return (host == null ? "" : host.toLowerCase()) + "|"
+                + (seg != null ? seg.toLowerCase() : "/");
+    }
+
+    /** First meaningful path segment (the "function" folder), or null. */
+    private static String featureSegment(String url) {
+        List<String> segs = meaningfulSegments(url, 1);
+        return segs.isEmpty() ? null : segs.get(0);
     }
 
     /** Meaningful path segments (generic prefixes, versions and ids dropped), capped. */
@@ -424,7 +459,7 @@ public class AiOrganizer {
 
     // ---- Parsing / sanitizing -------------------------------------------
 
-    private record Parsed(String name, String description, String category, String resource) {}
+    private record Parsed(String name, String description, String category) {}
 
     private static Parsed parse(String raw) {
         if (raw == null) return null;
@@ -435,9 +470,8 @@ public class AiOrganizer {
             String name = str(o, "name");
             String desc = str(o, "description");
             String category = str(o, "category");
-            String resource = str(o, "resource");
             if (name == null && desc == null && category == null) return null;
-            return new Parsed(name, desc, category, resource);
+            return new Parsed(name, desc, category);
         } catch (Exception e) {
             return null;
         }

@@ -79,6 +79,9 @@ public class DatabaseManager {
         // Folder coloring (Library tree) and account folders/coloring.
         addColumnIfMissing("folders", "color", "TEXT");
         addColumnIfMissing("accounts", "folder_id", "INTEGER");
+        // AI feature-level grouping: host + first meaningful path segment lets
+        // every endpoint of one function reuse the same folder. Older caches lack it.
+        addColumnIfMissing("ai_endpoint_cache", "feature_key", "TEXT");
         // Unify the quick-save hotkey default on Ctrl+Alt+B across the codebase.
         // Only rewrite known former defaults so a user's custom combo is preserved.
         try (PreparedStatement ps = connection.prepareStatement(
@@ -230,6 +233,7 @@ public class DatabaseManager {
             st.execute("""
                 CREATE TABLE IF NOT EXISTS ai_endpoint_cache (
                     signature   TEXT PRIMARY KEY,
+                    feature_key TEXT,
                     folder_id   INTEGER,
                     folder_path TEXT,
                     name        TEXT,

@@ -36,6 +36,29 @@ public class AiCacheRepository {
         }
     }
 
+    /**
+     * Feature-level lookup: returns the most recent classification for ANY
+     * endpoint sharing this {@code featureKey} (host + first meaningful path
+     * segment). Lets every endpoint of one function reuse the SAME folder — and
+     * the category the model already picked for that function — with zero extra
+     * API calls, so {@code /orders} and {@code /orders/{id}/cancel} group together.
+     * Only the returned entry's {@code folderPath} is meaningful to callers.
+     */
+    public Optional<CacheEntry> lookupByFeatureKey(String featureKey) throws SQLException {
+        if (featureKey == null || featureKey.isBlank()) return Optional.empty();
+        synchronized (db) {
+            String sql = "SELECT signature, folder_id, folder_path, name, description "
+                + "FROM ai_endpoint_cache WHERE feature_key = ? AND folder_id IS NOT NULL "
+                + "ORDER BY created_at DESC LIMIT 1";
+            try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
+                ps.setString(1, featureKey);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? Optional.of(map(rs)) : Optional.empty();
+                }
+            }
+        }
+    }
+
     private static CacheEntry map(ResultSet rs) throws SQLException {
         long fid = rs.getLong("folder_id");
         Long folderId = rs.wasNull() ? null : fid;
@@ -47,20 +70,21 @@ public class AiCacheRepository {
             rs.getString("description"));
     }
 
-    public void put(String signature, Long folderId, String folderPath,
+    public void put(String signature, String featureKey, Long folderId, String folderPath,
                     String name, String description) throws SQLException {
         if (signature == null) return;
         synchronized (db) {
             String sql = "INSERT OR REPLACE INTO ai_endpoint_cache "
-                + "(signature, folder_id, folder_path, name, description, created_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?)";
+                + "(signature, feature_key, folder_id, folder_path, name, description, created_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?)";
             try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {
                 ps.setString(1, signature);
-                if (folderId != null) ps.setLong(2, folderId); else ps.setNull(2, Types.INTEGER);
-                ps.setString(3, folderPath);
-                ps.setString(4, name);
-                ps.setString(5, description);
-                ps.setLong(6, Instant.now().getEpochSecond());
+                ps.setString(2, featureKey);
+                if (folderId != null) ps.setLong(3, folderId); else ps.setNull(3, Types.INTEGER);
+                ps.setString(4, folderPath);
+                ps.setString(5, name);
+                ps.setString(6, description);
+                ps.setLong(7, Instant.now().getEpochSecond());
                 ps.executeUpdate();
             }
         }

@@ -273,7 +273,8 @@ public class DatabaseManager {
                 {"ai_provider",       "GEMINI"},         // GEMINI / GROQ / OPENROUTER
                 {"ai_api_key",        ""},               // provider API key (stored locally)
                 {"ai_model",          ""},               // blank = provider default
-                {"ai_max_chars",      "1800"}            // truncation budget per request+response (token control)
+                {"ai_max_chars",      "1800"},           // truncation budget per request+response (token control)
+                {"ai_folder_by_host", "true"}            // prefix AI folders with the request host (multi-target)
             };
             for (String[] kv : defaults) {
                 ps.setString(1, kv[0]);

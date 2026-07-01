@@ -68,6 +68,7 @@ public class LibraryTab extends JPanel {
     private JTextField   statusFilter;
     private JCheckBox    searchInReqCheck;
     private JCheckBox    searchInRespCheck;
+    private JCheckBox    groupDupCheck;
     private List<TestCaseRow> allRows = new ArrayList<>();
 
     static final String[] COLOR_TAGS = {"RED", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE"};
@@ -279,8 +280,60 @@ public class LibraryTab extends JPanel {
             }
             shown.add(r);
         }
+
+        // Optionally collapse repeated captures of the same endpoint into one
+        // representative row (the first, i.e. lowest host/url/method order) with
+        // a ×N count so a library with many duplicate saves stays scannable.
+        if (groupDupCheck != null && groupDupCheck.isSelected()) {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            Map<String, TestCaseRow> firstOf = new LinkedHashMap<>();
+            for (TestCaseRow r : shown) {
+                String k = groupKey(r);
+                counts.merge(k, 1, Integer::sum);
+                firstOf.putIfAbsent(k, r);
+            }
+            List<TestCaseRow> collapsed = new ArrayList<>();
+            Map<Long, Integer> dupCounts = new HashMap<>();
+            for (var e : firstOf.entrySet()) {
+                TestCaseRow rep = e.getValue();
+                collapsed.add(rep);
+                dupCounts.put(rep.id(), counts.get(e.getKey()));
+            }
+            tableModel.setGroupCounts(dupCounts);
+            shown = collapsed;
+        } else {
+            tableModel.setGroupCounts(java.util.Collections.emptyMap());
+        }
+
         tableModel.setRows(shown);
         updateStatus(shown.size());
+    }
+
+    /** Endpoint grouping key: method + host + path with id-like segments templated. */
+    private static String groupKey(TestCaseRow r) {
+        String path;
+        try { path = new java.net.URI(r.url()).getPath(); }
+        catch (Exception e) { path = r.url(); }
+        if (path == null) path = "/";
+        StringBuilder sb = new StringBuilder();
+        for (String seg : path.split("/")) {
+            if (seg.isEmpty()) continue;
+            sb.append('/').append(isIdLikeSeg(seg) ? "{id}" : seg.toLowerCase());
+        }
+        return (r.method() == null ? "" : r.method().toUpperCase()) + " "
+            + (r.host() == null ? "" : r.host().toLowerCase()) + " "
+            + (sb.length() == 0 ? "/" : sb.toString());
+    }
+
+    private static boolean isIdLikeSeg(String seg) {
+        if (seg.matches("\\d+")) return true;
+        if (seg.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) return true;
+        if (seg.length() >= 12) {
+            int d = 0;
+            for (char c : seg.toCharArray()) if (Character.isDigit(c)) d++;
+            if (d >= 2) return true;
+        }
+        return false;
     }
 
     private static boolean matchesStatus(TestCaseRow r, String sf) {
@@ -368,6 +421,12 @@ public class LibraryTab extends JPanel {
         row2.add(searchInReqCheck);
         row2.add(searchInRespCheck);
         row2.add(deepSearch);
+
+        groupDupCheck = new JCheckBox("Group duplicates");
+        groupDupCheck.setToolTipText("Collapse repeated captures of the same endpoint "
+            + "(method + host + path) into one row with a ×N count");
+        groupDupCheck.addActionListener(e -> applyFilter());
+        row2.add(groupDupCheck);
 
         bar.add(row1, BorderLayout.NORTH);
         bar.add(row2, BorderLayout.CENTER);
@@ -1262,9 +1321,11 @@ public class LibraryTab extends JPanel {
             {"", "Method", "Name", "Host", "Path / URL", "Status", "Size", "Verdict", "Notes", "Captured"};
         private List<TestCaseRow> rows = new ArrayList<>();
         private Map<Long, String> verdicts = new HashMap<>();
+        private Map<Long, Integer> groupCounts = new HashMap<>();
 
         void setRows(List<TestCaseRow> rows) { this.rows = rows; fireTableDataChanged(); }
         void setVerdicts(Map<Long, String> v) { this.verdicts = v != null ? v : new HashMap<>(); fireTableDataChanged(); }
+        void setGroupCounts(Map<Long, Integer> c) { this.groupCounts = c != null ? c : new HashMap<>(); }
         String verdictFor(long tcId) { return verdicts.get(tcId); }
         TestCaseRow getRow(int i) { return rows.get(i); }
 
@@ -1278,7 +1339,11 @@ public class LibraryTab extends JPanel {
             return switch (col) {
                 case 0 -> "";   // danger badge drawn as a vector icon by the renderer
                 case 1 -> r.method();
-                case 2 -> r.name() != null ? r.name() : autoLabel(r);
+                case 2 -> {
+                    String nm = r.name() != null ? r.name() : autoLabel(r);
+                    Integer c = groupCounts.get(r.id());
+                    yield (c != null && c > 1) ? nm + "  ×" + c : nm;
+                }
                 case 3 -> r.host();
                 case 4 -> extractPath(r.url());
                 case 5 -> r.primaryBaselineStatus() != null ? String.valueOf(r.primaryBaselineStatus()) : "—";

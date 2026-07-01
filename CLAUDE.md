@@ -88,26 +88,33 @@ Recent additions:
 - **Footer** – global shortcuts/workflow help dialog + comfortable/compact density toggle (persisted,
   applied to all tables).
 - **AI auto-organization (`ai/`)** – opt-in. On capture (or via Library right-click ▸ *Organize with
-  AI*), the request+response is sent to a chosen LLM (Gemini / Groq / OpenRouter) which returns a
-  concise name, a one-line description (stored as notes), and a nested *function* folder; the request
-  is renamed and filed there. Auto-organization only touches Inbox items so explicit "Send to BAC…"
-  folder choices are respected. Consumption is kept low by: off-by-default, an **endpoint-signature
-  cache** (`ai_endpoint_cache`) so similar requests reuse a prior decision with **zero** API calls, a
-  truncation budget (`ai_max_chars`), and passing the existing folder list to the model so it reuses
-  folders. Keys live only in the local SQLite settings; calls go out via the JDK HttpClient (not Burp).
-  Settings tab → *AI Organization* (enable, provider, key, model, budget, Test connection, **Reset AI
-  grouping**).
-  - **URL-path grouping (deterministic):** the folder is built **from the request's URL path**, not by
-    the model — `AiOrganizer.urlFolderPath` mirrors the path segments with resource ids dropped
-    (`/api/users/123/posts → "api/users/posts"`), so the same URL area always maps to the same path.
-    `FolderRepository.findOrCreatePathCanonical` then **reuses an existing folder** (case/space/plural-
-    insensitive via `FolderRepository.canonical`) instead of spawning a new one per request — this is
-    what eliminates the "a new folder for every request" fragmentation. A path with no meaningful
-    segment leaves the request in the Inbox.
-  - **Naming:** the LLM (when configured) is asked for **only** a concise name + one-line description
-    (`AiOrganizer.describe`); the folder is never decided by the model. Each exact endpoint signature is
-    named at most once (cached in `ai_endpoint_cache`); repeats and AI-off both fall back to a readable
-    `METHOD last-segment` name with **zero** API calls. *Reset AI grouping* clears the cache.
+  AI*), the request+response is sent to a chosen LLM (Gemini / Groq / OpenRouter) which **classifies**
+  it and returns a functional category + resource + a concise action name + a one-line description
+  (stored as notes); the request is renamed and filed there. Auto-organization only touches Inbox items
+  so explicit "Send to BAC…" folder choices are respected. Consumption is kept low by: off-by-default,
+  an **endpoint-signature cache** (`ai_endpoint_cache`) so similar requests reuse a prior decision with
+  **zero** API calls, and a truncation budget (`ai_max_chars`). Keys live only in the local SQLite
+  settings; calls go out via the JDK HttpClient (not Burp). Settings tab → *AI Organization* (enable,
+  provider, key, model, budget, **group by host**, Test connection, **Reset AI grouping**).
+  - **Functional taxonomy (model-decided, shallow):** the folder is `[host]/Category[/Resource]` — the
+    model picks the `Category` from a **fixed list** (`AiOrganizer.CATEGORIES`: Authentication, Users &
+    Profiles, Admin, Billing & Payments, …, Misc) plus an optional 1–2 word `Resource` sub-folder, so
+    the tree stays **shallow (≤ 2 functional levels) and consistent** instead of mirroring the raw URL.
+    `AiOrganizer.normalizeCategory` snaps free-text replies onto the fixed list (else *Misc*). The host
+    prefix is toggled by the `ai_folder_by_host` setting (on by default). `FolderRepository.findOrCreate-
+    PathCanonical` **reuses an existing folder** (case/space/plural-insensitive via `canonical`) instead
+    of spawning a new one per request.
+  - **Fallback when AI is unavailable:** the request is filed under a cleaned, shallow URL-derived path
+    (`AiOrganizer.fallbackFolderPath` / `meaningfulSegments` — generic `api`/`v1` prefixes and ids
+    dropped, depth ≤ 2). This fallback is **never cached**, so a transient AI error (offline / rate-limit
+    / blocked reply) is **retried** on the next capture instead of permanently pinning the endpoint.
+  - **Naming:** the model returns a verb+object action name; it's stored as `METHOD — action`
+    (`AiOrganizer.nameWithMethod`). Each exact endpoint signature is classified at most once (cached in
+    `ai_endpoint_cache` — only AI-produced results are cached); repeats reuse the cached name/folder with
+    **zero** API calls, and the AI-off fallback is `METHOD — last-segment`. *Reset AI grouping* clears
+    the cache.
+  - **Library findability:** rows sort by host → url → method (same resource's verbs cluster); a
+    **"Group duplicates"** toggle collapses repeated captures of one endpoint into a single ×N row.
 
 Notable behaviours:
 

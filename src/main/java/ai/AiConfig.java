@@ -13,7 +13,8 @@ public record AiConfig(
         String provider,     // GEMINI / GROQ / OPENROUTER
         String apiKey,
         String model,        // blank → provider default
-        int maxChars) {
+        int maxChars,
+        boolean folderByHost) {  // prefix folders with the request host (multi-target)
 
     public static AiConfig load(DatabaseManager db) {
         boolean enabled      = !"false".equalsIgnoreCase(get(db, "ai_enabled", "false"));
@@ -22,7 +23,8 @@ public record AiConfig(
         String apiKey        = get(db, "ai_api_key", "");
         String model         = get(db, "ai_model", "").trim();
         int maxChars         = parseInt(get(db, "ai_max_chars", "1800"), 1800);
-        return new AiConfig(enabled, autoOrganize, provider, apiKey, model, maxChars);
+        boolean folderByHost = !"false".equalsIgnoreCase(get(db, "ai_folder_by_host", "true"));
+        return new AiConfig(enabled, autoOrganize, provider, apiKey, model, maxChars, folderByHost);
     }
 
     /** True when AI can actually be called (enabled + a key is present). */

@@ -106,10 +106,11 @@ Recent additions:
     snaps free-text replies onto the fixed list (else *Misc*); the host prefix is toggled by
     `ai_folder_by_host` (on by default); `FolderRepository.findOrCreatePathCanonical` reuses existing
     folders (case/space/plural-insensitive via `canonical`).
-  - **API budget:** ~**one call per function**, not per endpoint — the *first* endpoint of a function is
-    classified by the model; later siblings reuse its folder (step 2 in `organizeOne`) with a
-    deterministic `METHOD — last-segment` name and no call; an exact repeat of one endpoint reuses its
-    cached name/folder (step 1).
+  - **Naming vs grouping:** each distinct endpoint gets its **own** model-written `METHOD — action` name,
+    but the **folder is reused per function** (via the feature-key lookup) so the category is only
+    decided once. An exact repeat of one endpoint reuses its cached name/folder with **zero** calls
+    (step 1); a naming failure on a known-function endpoint still files it in the right folder but is
+    **not cached**, so the name is retried next time.
   - **Fallback when AI is unavailable:** the request is filed under a cleaned, shallow URL-derived path
     (`AiOrganizer.fallbackFolderPath` / `meaningfulSegments`, depth ≤ 2). This fallback is **never
     cached**, so a transient AI error (offline / rate-limit / blocked reply) is **retried** on the next

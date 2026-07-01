@@ -24,8 +24,9 @@ import java.util.regex.Pattern;
  * and {@code Feature} is the deterministic first meaningful path segment. The
  * category is decided ONCE per function and reused (feature-key cache), so every
  * endpoint of one function (e.g. all of {@code /orders/*}) lands in the SAME
- * folder — one API call per function, not per endpoint, and no fragmentation.
- * An exact-endpoint cache means a repeated request costs nothing.
+ * folder — no fragmentation. Each distinct endpoint still gets its own short
+ * action name from the model; an exact-endpoint cache means a repeated request
+ * costs nothing.
  *
  * <p>When AI is unavailable the request is still filed under a cleaned,
  * URL-derived fallback folder (that fallback is never cached, so it is retried
@@ -183,28 +184,10 @@ public class AiOrganizer {
             return;
         }
 
-        // 2) A DIFFERENT endpoint of the SAME function was already classified →
-        //    reuse its folder (same Category + Feature) with NO API call, so all
-        //    of e.g. /orders, /orders/{id}, /orders/{id}/cancel land together.
+        // 2) Ask the model for THIS endpoint's action name (and, only when the
+        //    function is new, its category). Every endpoint gets its own name;
+        //    grouping is guaranteed by reusing the function's folder below.
         CacheEntry feat = cacheRepo.lookupByFeatureKey(featureKey).orElse(null);
-        if (feat != null && feat.folderPath() != null && !feat.folderPath().isBlank()) {
-            String folderPath = feat.folderPath();
-            Long folderId = pathToFolder(folderPath);
-            String name = fallbackName(row);   // deterministic; grouping is the priority
-            apply(row.id(), name, null, folderId);
-            cacheRepo.put(signature, featureKey, folderId, folderPath, name, null);
-            api.logging().logToOutput("[BAC][AI] Grouped #" + row.id() + " → " + folderPath
-                    + " (same function, no API call).");
-            status("AI ✓ grouped → " + folderPath + " (function)");
-            return;
-        }
-
-        // 3) First endpoint of a NEW function → ask the model once for the
-        //    functional category (+ a name). Build a stable, shallow folder
-        //    [host]/Category/Feature where Feature is the deterministic first
-        //    meaningful path segment, so later siblings reuse it via step 2.
-        //    On failure we file under a cleaned URL fallback and DON'T cache it,
-        //    so the classification is retried once AI is reachable again.
         Parsed p = null;
         if (cfg.isConfigured()) {
             try {
@@ -215,35 +198,49 @@ public class AiOrganizer {
             }
         }
 
-        if (p != null && p.category() != null && !p.category().isBlank()) {
+        // Pick the folder: reuse the function's existing folder if one exists
+        // (so /orders, /orders/{id}, /orders/{id}/cancel all land together);
+        // otherwise build a stable [host]/Category/Feature from the model's
+        // category. If there's no prior folder AND AI failed, fall back to a
+        // cleaned URL path and DON'T cache, so classification is retried later.
+        String folderPath;
+        if (feat != null && feat.folderPath() != null && !feat.folderPath().isBlank()) {
+            folderPath = feat.folderPath();
+        } else if (p != null && p.category() != null && !p.category().isBlank()) {
             String category = normalizeCategory(p.category());
             String feature  = featureSegment(row.url());
             List<String> parts = new ArrayList<>();
             if (cfg.folderByHost()) { String h = hostSegment(row.host()); if (h != null) parts.add(h); }
             parts.add(category);
             if (feature != null) parts.add(feature);
-            String folderPath = String.join("/", parts);
-            Long folderId = folderRepo.findOrCreatePathCanonical(folderPath);
-
-            String aiName = sanitizeName(p.name());
-            String name = (aiName != null && !aiName.isBlank())
-                    ? nameWithMethod(row.method(), aiName) : fallbackName(row);
-            String desc = sanitizeDescription(p.description());
-            apply(row.id(), name, desc, folderId);
-            cacheRepo.put(signature, featureKey, folderId, folderPath, name, desc);
-            api.logging().logToOutput("[BAC][AI] Classified #" + row.id() + " → " + folderPath
-                    + " as \"" + name + "\".");
-            status("AI ✓ " + name + " → " + folderPath);
+            folderPath = String.join("/", parts);
         } else {
-            String folderPath = fallbackFolderPath(cfg, row);
-            Long folderId = folderPath == null ? null
-                    : folderRepo.findOrCreatePathCanonical(folderPath);
+            String fb = fallbackFolderPath(cfg, row);
+            Long fid = fb == null ? null : folderRepo.findOrCreatePathCanonical(fb);
             String name = fallbackName(row);
-            apply(row.id(), name, null, folderId);
-            api.logging().logToOutput("[BAC][AI] Filed #" + row.id() + " → " + folderPath
+            apply(row.id(), name, null, fid);
+            api.logging().logToOutput("[BAC][AI] Filed #" + row.id() + " → " + fb
                     + " as \"" + name + "\" (no AI classification; will retry next time).");
-            status("AI ⚠ filed → " + folderPath + " (no AI)");
+            status("AI ⚠ filed → " + fb + " (no AI)");
+            return;
         }
+
+        Long folderId = folderRepo.findOrCreatePathCanonical(folderPath);
+        String aiName = p != null ? sanitizeName(p.name()) : null;
+        boolean aiNamed = aiName != null && !aiName.isBlank();
+        String name = aiNamed ? nameWithMethod(row.method(), aiName) : fallbackName(row);
+        String desc = sanitizeDescription(p != null ? p.description() : null);
+        apply(row.id(), name, desc, folderId);
+
+        // Cache only when the name came from the model, so a transient naming
+        // failure on a known-function endpoint is retried rather than pinned to
+        // a fallback name — the folder is already stable either way.
+        if (aiNamed) {
+            cacheRepo.put(signature, featureKey, folderId, folderPath, name, desc);
+        }
+        api.logging().logToOutput("[BAC][AI] Organized #" + row.id() + " → " + folderPath
+                + " as \"" + name + "\"" + (aiNamed ? "." : " (fallback name; will retry)."));
+        status("AI ✓ " + name + " → " + folderPath);
     }
 
     /** Resolves a folder path to an id (creating as needed); null/blank → Inbox. */

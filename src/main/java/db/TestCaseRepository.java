@@ -428,7 +428,7 @@ public class TestCaseRepository {
             LEFT JOIN accounts a ON a.id = tc.owner_acct_id
             LEFT JOIN baselines b ON b.id = tc.primary_baseline_id
             WHERE %s
-            ORDER BY tc.created_at DESC
+            ORDER BY tc.host, tc.url, tc.method, tc.created_at
             """.formatted(where);
         List<TestCaseRow> rows = new ArrayList<>();
         try (PreparedStatement ps = db.getConnection().prepareStatement(sql)) {

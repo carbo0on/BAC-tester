@@ -54,6 +54,7 @@ public class SettingsTab extends JPanel {
     // AI organization
     private JCheckBox aiEnabledCheck;
     private JCheckBox aiAutoOrganizeCheck;
+    private JCheckBox aiFolderByHostCheck;
     private JComboBox<String> aiProviderCombo;
     private JPasswordField aiApiKeyField;
     private JTextField aiModelField;
@@ -183,6 +184,11 @@ public class SettingsTab extends JPanel {
             + "(off = only via right-click ▸ Organize with AI)");
         aiAutoOrganizeCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
         ai.addContent(aiAutoOrganizeCheck);
+
+        aiFolderByHostCheck = new JCheckBox("Group under a top folder per host (recommended when "
+            + "testing multiple targets)");
+        aiFolderByHostCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
+        ai.addContent(aiFolderByHostCheck);
 
         aiProviderCombo = new JComboBox<>(new String[]{"GEMINI", "GROQ", "OPENROUTER"});
         ai.addContent(row("Provider:", aiProviderCombo,
@@ -410,6 +416,7 @@ public class SettingsTab extends JPanel {
                 String aiApiKey    = db.getSetting("ai_api_key");
                 String aiModel     = db.getSetting("ai_model");
                 String aiMaxChars  = db.getSetting("ai_max_chars");
+                String aiByHost    = db.getSetting("ai_folder_by_host");
 
                 SwingUtilities.invokeLater(() -> {
                     setSpinner(thresholdSpinner, threshold);
@@ -439,6 +446,7 @@ public class SettingsTab extends JPanel {
                     hotkeyField.setText(hotkey != null && !hotkey.isBlank() ? hotkey : "Ctrl+Alt+B");
                     aiEnabledCheck.setSelected("true".equalsIgnoreCase(aiEnabled));
                     aiAutoOrganizeCheck.setSelected(!"false".equalsIgnoreCase(aiAuto));
+                    aiFolderByHostCheck.setSelected(!"false".equalsIgnoreCase(aiByHost));
                     if (aiProvider != null) aiProviderCombo.setSelectedItem(aiProvider.trim().toUpperCase());
                     if (aiApiKey != null) aiApiKeyField.setText(aiApiKey);
                     if (aiModel != null) aiModelField.setText(aiModel);
@@ -485,6 +493,7 @@ public class SettingsTab extends JPanel {
         final String hotkeyToSave = hotkeyRaw.isBlank() ? "Ctrl+Alt+B" : hotkeyRaw;
         boolean aiEnabled  = aiEnabledCheck.isSelected();
         boolean aiAuto     = aiAutoOrganizeCheck.isSelected();
+        boolean aiByHost   = aiFolderByHostCheck.isSelected();
         String aiProvider  = (String) aiProviderCombo.getSelectedItem();
         String aiApiKey    = new String(aiApiKeyField.getPassword()).trim();
         String aiModel     = aiModelField.getText().trim();
@@ -520,6 +529,7 @@ public class SettingsTab extends JPanel {
                 db.setSetting("ai_api_key", aiApiKey);
                 db.setSetting("ai_model", aiModel);
                 db.setSetting("ai_max_chars", String.valueOf(aiMaxChars));
+                db.setSetting("ai_folder_by_host", String.valueOf(aiByHost));
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(this, "Settings saved.", "Saved", JOptionPane.INFORMATION_MESSAGE);
                     if (onSaved != null) onSaved.run();
@@ -568,7 +578,7 @@ public class SettingsTab extends JPanel {
         final String fProvider = provider != null ? provider : "GEMINI";
         final String fModel = model;
         final int maxChars = (Integer) aiMaxCharsSpinner.getValue();
-        ai.AiConfig cfg = new ai.AiConfig(true, true, fProvider, apiKey, model, 800);
+        ai.AiConfig cfg = new ai.AiConfig(true, true, fProvider, apiKey, model, 800, true);
         loader.submit(() -> {
             String result;
             boolean ok;
